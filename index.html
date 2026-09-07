@@ -298,6 +298,7 @@ let netRoom=null;
 let netPlayerId=null;
 let netOpponentId=null;
 let netReady=false;
+let netSlot=0;
 let remoteState=null;
 let lastNetSend=0;
 
@@ -358,7 +359,7 @@ function handleNetMessage(msg){
   if(msg.type==="room_created"){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
-    netSlot=0;
+    netSlot=Number.isInteger(msg.slot)?msg.slot:0;
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
     setOnlineStatus("Raum erstellt. Warte auf deinen Freund …");
@@ -370,8 +371,17 @@ function handleNetMessage(msg){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
     netOpponentId=msg.opponentId||null;
-    netSlot=1;
+    netSlot=Number.isInteger(msg.slot)?msg.slot:1;
     if(netOpponentId)ensureRemotePlayer(netOpponentId);
+    if(msg.spawn){
+      player.obj.position.set(msg.spawn.x,msg.spawn.y,msg.spawn.z);
+      player.yVel=0; player.onGround=true;
+    }
+    if(msg.opponentSpawn && netOpponentId){
+      const rp=remotePlayers.get(netOpponentId);
+      rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
+      rp.obj.visible=true;
+    }
     setOnlineStatus("Raum beigetreten.");
     setOnlineBadge(`Raum ${msg.room}`);
     return;
@@ -380,15 +390,31 @@ function handleNetMessage(msg){
   if(msg.type==="opponent_joined"){
     netOpponentId=msg.playerId;
     ensureRemotePlayer(netOpponentId);
+    if(msg.opponentSpawn){
+      const rp=remotePlayers.get(netOpponentId);
+      rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
+      rp.obj.visible=true;
+    }
     setOnlineStatus("Freund verbunden – Spiel startet.");
-    beginOnlineMatch();
     return;
   }
 
   if(msg.type==="match_start"){
     netOpponentId=msg.opponentId;
+    netSlot=Number.isInteger(msg.slot)?msg.slot:netSlot;
     ensureRemotePlayer(netOpponentId);
-    beginOnlineMatch();
+
+    if(msg.spawn){
+      player.obj.position.set(msg.spawn.x,msg.spawn.y,msg.spawn.z);
+      player.yVel=0; player.onGround=true;
+    }
+    if(msg.opponentSpawn){
+      const rp=remotePlayers.get(netOpponentId);
+      rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
+      rp.obj.visible=true;
+    }
+
+    beginOnlineMatch(msg.spawn);
     return;
   }
 
@@ -458,7 +484,7 @@ function handleNetMessage(msg){
   }
 }
 
-function beginOnlineMatch(){
+function beginOnlineMatch(serverSpawn=null){
   netReady=true;
   document.getElementById("onlineLobby").style.display="none";
 
@@ -476,10 +502,10 @@ function beginOnlineMatch(){
 
   player.spawnProtect=3;
 
-  // Deterministic opposite starting positions so both players never begin stacked.
-  const spawn=netSlot===1
-    ? new THREE.Vector3(30,0,6)
-    : new THREE.Vector3(-30,0,-6);
+  // Prefer the server-assigned spawn so both clients agree on who is where.
+  const spawn=serverSpawn
+    ? new THREE.Vector3(serverSpawn.x,serverSpawn.y,serverSpawn.z)
+    : (netSlot===1 ? new THREE.Vector3(30,0,6) : new THREE.Vector3(-30,0,-6));
   player.obj.position.copy(spawn);
   player.yVel=0;
   player.onGround=true;
@@ -492,6 +518,13 @@ function ensureRemotePlayer(id){
 
   const obj=makeFighter(0x2f6fa8,.62);
   obj.position.set(8,0,8);
+  obj.visible=true;
+  obj.traverse(child=>{
+    if(child.isMesh){
+      child.frustumCulled=false;
+      child.renderOrder=2;
+    }
+  });
   scene.add(obj);
 
   const rp={
@@ -521,6 +554,16 @@ function ensureRemotePlayer(id){
   obj.add(shieldBubble);
   rp.shieldBubble=shieldBubble;
 
+  const marker=new THREE.Mesh(
+    new THREE.ConeGeometry(.16,.34,10),
+    new THREE.MeshBasicMaterial({color:0xff4f4f,depthTest:false})
+  );
+  marker.position.y=2.95;
+  marker.rotation.z=Math.PI;
+  marker.renderOrder=999;
+  obj.add(marker);
+  rp.marker=marker;
+
   remotePlayers.set(id,rp);
 }
 
@@ -532,8 +575,11 @@ function applyRemoteState(id,state){
   rp.alive=state.alive!==false;
   rp.obj.visible=rp.alive;
 
-  rp.obj.position.set(state.x,state.y,state.z);
-  rp.obj.rotation.y=state.yaw||0;
+  const sx=Number(state.x), sy=Number(state.y), sz=Number(state.z);
+  if(Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sz)){
+    rp.obj.position.set(sx,sy,sz);
+  }
+  rp.obj.rotation.y=Number(state.yaw)||0;
   rp.weapon=state.weapon||"rifle";
   rp.spawnProtect=Math.max(0,Number(state.spawnProtect)||0);
   if(rp.shieldBubble){
@@ -1285,61 +1331,62 @@ let yaw=0;
 let pitch=0;
 
 let mouseInside=false;
-let lastMouseX=null;
-let lastMouseY=null;
+let pointerLocked=false;
 
-// Direkte Maussteuerung ohne Pointer Lock:
-// Jede echte Mausbewegung dreht die Kamera.
-// Das Fadenkreuz bleibt exakt in der Bildschirmmitte und entspricht der Blick-/Schussrichtung.
-renderer.domElement.addEventListener("mouseenter",e=>{
-  mouseInside=true;
-  lastMouseX=e.clientX;
-  lastMouseY=e.clientY;
-  if(!paused && !shopOpen){
-    renderer.domElement.focus({preventScroll:true});
-    renderer.domElement.style.cursor="none";
+function requestGamePointerLock(){
+  if(paused || shopOpen || !netReady || !roundActive)return;
+  if(document.pointerLockElement!==renderer.domElement){
+    renderer.domElement.requestPointerLock?.();
+  }
+}
+
+document.addEventListener("pointerlockchange",()=>{
+  pointerLocked=document.pointerLockElement===renderer.domElement;
+  renderer.domElement.style.cursor=pointerLocked?"none":"default";
+
+  // ESC releases Pointer Lock. In an active match this is the pause action.
+  if(!pointerLocked && !paused && !shopOpen && netReady && roundActive){
+    pauseGame(false);
   }
 });
 
-renderer.domElement.addEventListener("mouseleave",()=>{
-  mouseInside=false;
-  lastMouseX=null;
-  lastMouseY=null;
-  renderer.domElement.style.cursor="default";
+document.addEventListener("pointerlockerror",()=>{
+  const el=document.getElementById("inputState");
+  if(el)el.textContent="Input: Pointer Lock konnte nicht aktiviert werden";
 });
 
-renderer.domElement.addEventListener("mousemove",e=>{
-  if(paused || shopOpen || !mouseInside)return;
+renderer.domElement.addEventListener("mouseenter",()=>{ mouseInside=true; });
+renderer.domElement.addEventListener("mouseleave",()=>{ mouseInside=false; });
 
-  if(lastMouseX===null || lastMouseY===null){
-    lastMouseX=e.clientX;
-    lastMouseY=e.clientY;
-    return;
-  }
+document.addEventListener("mousemove",e=>{
+  if(paused || shopOpen || !pointerLocked)return;
 
-  const dx=e.clientX-lastMouseX;
-  const dy=e.clientY-lastMouseY;
+  const sensitivityX=.0026;
+  const sensitivityY=.0023;
 
-  lastMouseX=e.clientX;
-  lastMouseY=e.clientY;
-
-  // Niedrige, direkte FPS-Sensitivität.
-  const sensitivityX=.0030;
-  const sensitivityY=.0026;
-
-  yaw -= dx*sensitivityX;
-  pitch -= dy*sensitivityY;
+  yaw -= e.movementX*sensitivityX;
+  pitch -= e.movementY*sensitivityY;
   pitch=clamp(pitch,-1.22,1.02);
 
   const el=document.getElementById("inputState");
-  if(el)el.textContent="Input: Direktes Umsehen";
+  if(el)el.textContent="Input: Maus gelockt";
+});
+
+renderer.domElement.addEventListener("click",()=>{
+  if(!paused && !shopOpen && netReady && roundActive){
+    requestGamePointerLock();
+  }
 });
 
 // Linksklick schießt direkt in die Blickrichtung/Fadenkreuzmitte.
 renderer.domElement.addEventListener("mousedown",e=>{
-  if(paused || shopOpen)return;
+  if(paused || shopOpen || !roundActive)return;
 
   renderer.domElement.focus({preventScroll:true});
+  if(document.pointerLockElement!==renderer.domElement){
+    requestGamePointerLock();
+    return;
+  }
 
   if(e.button===0){
     e.preventDefault();
@@ -1378,10 +1425,14 @@ window.addEventListener("keydown",e=>{
   const code=(e.code||"").toLowerCase();
 
   if(code==="escape"){
-    e.preventDefault();
     if(shopOpen)return;
-    if(paused)resumeGame();
-    else pauseGame();
+    if(paused){
+      e.preventDefault();
+      resumeGame();
+    }else if(document.pointerLockElement!==renderer.domElement){
+      e.preventDefault();
+      pauseGame(false);
+    }
     return;
   }
 
@@ -1439,13 +1490,14 @@ function clearInputState(){
   mouseHeld=false;
 }
 
-function pauseGame(){
+function pauseGame(exitLock=true){
   if(paused || shopOpen)return;
   paused=true;
   clearInputState();
-  lastMouseX=null;
-  lastMouseY=null;
   renderer.domElement.style.cursor="default";
+  if(exitLock && document.pointerLockElement===renderer.domElement){
+    document.exitPointerLock?.();
+  }
 
   document.getElementById("pauseMenu").style.display="flex";
   document.getElementById("inputState").textContent="Input: pausiert";
@@ -1456,18 +1508,12 @@ function resumeGame(){
   paused=false;
   document.getElementById("pauseMenu").style.display="none";
   renderer.domElement.focus({preventScroll:true});
-  lastMouseX=null;
-  lastMouseY=null;
-  if(mouseInside)renderer.domElement.style.cursor="none";
-
-  // Must be called directly from the user click/key event where possible.
-  renderer.domElement.focus({preventScroll:true});
-
-  document.getElementById("inputState").textContent="Input: Maus bewegen | Linksklick schießen";
+  document.getElementById("inputState").textContent="Input: Klick ins Spiel zum Fortsetzen";
 }
 
 document.getElementById("resumeBtn").addEventListener("click",()=>{
   resumeGame();
+  requestGamePointerLock();
 });
 
 
@@ -2861,8 +2907,8 @@ document.addEventListener("visibilitychange",()=>{
 });
 
 window.addEventListener("blur",()=>{
-  if(!paused && !shopOpen){
-    pauseGame();
+  if(!paused && !shopOpen && document.pointerLockElement!==renderer.domElement){
+    pauseGame(false);
   }
 });
 
