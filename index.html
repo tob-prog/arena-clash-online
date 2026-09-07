@@ -306,6 +306,11 @@ function handleNetMessage(msg){
   if(msg.type==="room_created"){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
+
+    // Host starts on the left side.
+    player.obj.position.set(-30,0,-6);
+    player.yVel=0;
+    player.onGround=true;
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
     setOnlineStatus("Raum erstellt. Warte auf deinen Freund …");
@@ -317,6 +322,11 @@ function handleNetMessage(msg){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
     netOpponentId=msg.opponentId||null;
+
+    // Joining player starts on the opposite side.
+    player.obj.position.set(30,0,6);
+    player.yVel=0;
+    player.onGround=true;
     setOnlineStatus("Raum beigetreten.");
     setOnlineBadge(`Raum ${msg.room}`);
     return;
@@ -324,6 +334,12 @@ function handleNetMessage(msg){
 
   if(msg.type==="opponent_joined"){
     netOpponentId=msg.playerId;
+    ensureRemotePlayer(netOpponentId);
+
+    // Host knows where the joining player initially starts.
+    const rp=remotePlayers.get(netOpponentId);
+    if(rp)rp.obj.position.set(30,0,6);
+
     setOnlineStatus("Freund verbunden – Spiel startet.");
     beginOnlineMatch();
     return;
@@ -331,6 +347,12 @@ function handleNetMessage(msg){
 
   if(msg.type==="match_start"){
     netOpponentId=msg.opponentId;
+    ensureRemotePlayer(netOpponentId);
+
+    // Joiner knows where the host initially starts.
+    const rp=remotePlayers.get(netOpponentId);
+    if(rp)rp.obj.position.set(-30,0,-6);
+
     beginOnlineMatch();
     return;
   }
@@ -415,8 +437,18 @@ function beginOnlineMatch(){
 function ensureRemotePlayer(id){
   if(remotePlayers.has(id))return;
 
-  const obj=makeFighter(0x2f6fa8,.62);
+  const obj=makeFighter(0xe04b4b,.62);
   obj.position.set(8,0,8);
+  obj.visible=true;
+
+  obj.traverse(child=>{
+    if(child.isMesh){
+      child.visible=true;
+      child.castShadow=true;
+      child.receiveShadow=true;
+    }
+  });
+
   scene.add(obj);
 
   remotePlayers.set(id,{
@@ -443,13 +475,29 @@ function applyRemoteState(id,state){
   // Avoid tiny network/physics offsets making the remote model hover.
   if(Math.abs(remoteY)<.04)remoteY=0;
 
-  rp.obj.position.set(state.x,remoteY,state.z);
+  const target=new THREE.Vector3(state.x,remoteY,state.z);
+
+  // First valid update snaps; following updates interpolate.
+  if(!rp.hasNetState){
+    rp.obj.position.copy(target);
+    rp.hasNetState=true;
+  }else{
+    rp.obj.position.lerp(target,.42);
+  }
+
   rp.obj.rotation.y=state.yaw||0;
   rp.weapon=state.weapon||"rifle";
 }
 
 function sendLocalState(now){
   if(!netReady || !netConnected)return;
+
+  if(netOpponentId){
+    const rp=remotePlayers.get(netOpponentId);
+    setOnlineBadge(
+      `Online 1v1 – ${netRoom} – Gegner: ${rp && rp.hasNetState ? "sichtbar" : "verbunden"}`
+    );
+  }
   if(now-lastNetSend<50)return;
   lastNetSend=now;
 
@@ -2724,7 +2772,7 @@ function loop(now){
 
   if(!paused || netReady){
     updatePlayer(dt);
-    updateEnemies(dt);
+    if(!netReady)updateEnemies(dt);
     updateBullets(dt);
     updateDrops(dt);
     updateTemporaryWalls(dt);
@@ -2732,6 +2780,9 @@ function loop(now){
     updateCamera(dt);
     updateUI();
   }
+
+  // Multiplayer state sync (~20 updates/sec internally throttled).
+  sendLocalState(now);
 
   renderer.render(scene,camera);
   requestAnimationFrame(loop);
