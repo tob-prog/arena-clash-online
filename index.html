@@ -330,6 +330,8 @@ let netMoney=0;
 let deathRespawnPending=false;
 let remoteState=null;
 let lastNetSend=0;
+let localShotSeq=0;
+let lastLocalShotNet=null;
 
 const remotePlayers=new Map();
 
@@ -501,12 +503,9 @@ function handleNetMessage(msg){
   }
 
   if(msg.type==="remote_shoot"){
-    if(msg.playerId===netPlayerId)return;
-    try{
-      spawnRemoteShot(msg);
-    }catch(err){
-      console.warn("Remote shot verworfen:",err);
-    }
+    // Legacy-Paket absichtlich ignorieren.
+    // Seit SYNC-FIX 6 laufen Schüsse ausschließlich über "state",
+    // damit ein Schuss niemals den Positions-Sync trennt.
     return;
   }
 
@@ -709,6 +708,7 @@ function ensureRemotePlayer(id){
     weapon:"rifle",
     alive:true,
     spawnProtect:0,
+    lastShotSeq:0,
     healthBar:null,
     shieldBubble:null
   };
@@ -762,6 +762,31 @@ function applyRemoteState(id,state){
   }
   rp.obj.rotation.y=Number(state.yaw)||0;
   rp.weapon=state.weapon||"rifle";
+
+  // Schüsse werden aus dem State-Sync abgeleitet.
+  // Positionsupdates und Schussdarstellung benutzen damit garantiert
+  // denselben WebSocket-Pfad.
+  const incomingShotSeq=Number(state.shotSeq)||0;
+  if(incomingShotSeq>0 && incomingShotSeq!==rp.lastShotSeq){
+    rp.lastShotSeq=incomingShotSeq;
+
+    const shot=state.shot;
+    if(shot){
+      try{
+        spawnRemoteShot({
+          playerId:id,
+          origin:shot.origin,
+          dir:shot.dir,
+          speed:shot.speed,
+          damage:shot.damage,
+          weapon:shot.weapon
+        });
+      }catch(err){
+        console.warn("Remote-State-Schuss verworfen:",err);
+      }
+    }
+  }
+
   rp.spawnProtect=Math.max(0,Number(state.spawnProtect)||0);
   if(rp.shieldBubble){
     rp.shieldBubble.visible=rp.alive && rp.spawnProtect>0;
@@ -787,7 +812,13 @@ function sendLocalState(now){
       onGround:player.onGround===true,
       spawnProtect:Math.max(0,player.spawnProtect||0),
       weapon:WEAPONS[currentWeaponIndex]?.id||"rifle",
-      super:selectedSuper
+      super:selectedSuper,
+
+      // Schussereignis läuft über denselben stabilen State-Kanal.
+      // Dadurch kann ein separates "shoot"-Paket den Positions-Sync
+      // nicht mehr stören.
+      shotSeq:localShotSeq,
+      shot:lastLocalShotNet
     }
   });
 }
@@ -2359,7 +2390,9 @@ function spawnBullet(ownerObj,target,speed,damage,owner,angleOffset=0,exactOrigi
   scene.add(mesh);
 
   bullets.push({
-    mesh,vel:dir.multiplyScalar(speed),damage,owner,life:2.5,
+    mesh,
+    prevPos:origin.clone(),
+    vel:dir.multiplyScalar(speed),damage,owner,life:2.5,
     pierce:owner==="player"?player.pierce:0,
     explosive:owner==="player"&&player.explosive,
     chain:owner==="player"&&player.chain,
@@ -2430,13 +2463,19 @@ function shootPlayer(){
   }
 
   if(netReady && netOpponentId && networkDir){
-    sendNet("shoot",{
+    localShotSeq++;
+    lastLocalShotNet={
       origin:{x:muzzleWorld.x,y:muzzleWorld.y,z:muzzleWorld.z},
       dir:{x:networkDir.x,y:networkDir.y,z:networkDir.z},
       speed:player.bulletSpeed,
       damage:player.damage,
       weapon:weapon?.id||"pistol"
-    });
+    };
+
+    // State sofort senden, damit der Schuss ohne merkbare Verzögerung
+    // beim Gegner erscheint. Danach läuft der normale 50-ms-Sync weiter.
+    lastNetSend=0;
+    sendLocalState(performance.now());
   }
 
   // Spürbarer Kamerarückstoß.
@@ -3363,10 +3402,50 @@ function updateRemoteVisualShots(dt){
   }
 }
 
+function segmentHitsSphere(a,b,center,radius){
+  const ab=b.clone().sub(a);
+  const lenSq=ab.lengthSq();
+
+  if(lenSq<0.0000001){
+    return a.distanceToSquared(center)<=radius*radius;
+  }
+
+  const t=THREE.MathUtils.clamp(
+    center.clone().sub(a).dot(ab)/lenSq,
+    0,
+    1
+  );
+
+  const closest=a.clone().addScaledVector(ab,t);
+  return closest.distanceToSquared(center)<=radius*radius;
+}
+
+function remotePlayerHitPartSegment(a,b,rp){
+  if(!rp?.obj || rp.alive===false)return null;
+
+  const p=rp.obj.position;
+
+  // Geometrie des tatsächlichen Fighter-Modells:
+  // Kopf sitzt bei y + 2.18.
+  const head=new THREE.Vector3(p.x,p.y+2.18,p.z);
+  if(segmentHitsSphere(a,b,head,.36))return "head";
+
+  // Torso/Becken als zwei überlappende Kugeln.
+  const chest=new THREE.Vector3(p.x,p.y+1.52,p.z);
+  if(segmentHitsSphere(a,b,chest,.50))return "body";
+
+  const lower=new THREE.Vector3(p.x,p.y+.92,p.z);
+  if(segmentHitsSphere(a,b,lower,.43))return "body";
+
+  return null;
+}
+
 function updateBullets(dt){
   for(let i=bullets.length-1;i>=0;i--){
     const b=bullets[i];
+    const previousPos=(b.prevPos||b.mesh.position).clone();
     b.mesh.position.addScaledVector(b.vel,dt);
+    b.prevPos.copy(b.mesh.position);
     b.life-=dt;
 
     if(projectileHitsTemporaryWall(b.mesh.position)){
@@ -3384,23 +3463,22 @@ function updateBullets(dt){
       if(netReady && netOpponentId && remotePlayers.has(netOpponentId)){
         const rp=remotePlayers.get(netOpponentId);
         if(rp.alive && (rp.spawnProtect||0)<=0){
-          const p=rp.obj.position.clone();
-          const localPlayerBackup=player.obj.position.clone();
-          // Same humanoid-sized approximation as enemies.
-          const dx=b.mesh.position.x-p.x;
-          const dz=b.mesh.position.z-p.z;
-          const bodyY=Math.max(p.y+.35,Math.min(b.mesh.position.y,p.y+1.57));
-          const dy=b.mesh.position.y-bodyY;
-          const hitBody=dx*dx+dy*dy+dz*dz <= .48*.48;
+          // Swept hit test statt nur der aktuellen Bullet-Position.
+          // Dadurch kann ein schnelles Projektil nicht mehr zwischen
+          // zwei Frames komplett durch die Spieler-Hitbox springen.
+          const hitPart=remotePlayerHitPartSegment(
+            previousPos,
+            b.mesh.position,
+            rp
+          );
 
-          const hx=b.mesh.position.x-p.x;
-          const hy=b.mesh.position.y-(p.y+1.85);
-          const hz=b.mesh.position.z-p.z;
-          const hitHead=hx*hx+hy*hy+hz*hz <= .34*.34;
-
-          if(hitBody||hitHead){
-            const dmg=(hitHead?b.damage*1.75:b.damage);
-            if(hitHead)showDamageNumber(rp.obj.position,dmg,"HEAD ");
+          if(hitPart){
+            const dmg=hitPart==="head"?b.damage*1.75:b.damage;
+            showDamageNumber(
+              rp.obj.position,
+              dmg,
+              hitPart==="head"?"HEAD ":""
+            );
             requestDamageRemote(dmg);
             scene.remove(b.mesh);
             bullets.splice(i,1);
@@ -3630,7 +3708,19 @@ function loop(now){
     updatePlayer(dt);
     updateEnemies(dt);
     updateBullets(dt);
-    updateRemoteVisualShots(dt);
+
+    try{
+      updateRemoteVisualShots(dt);
+    }catch(err){
+      console.warn("Remote-Schussgrafik übersprungen:",err);
+
+      // Defekte Visuals entfernen, aber Netzwerk/Spiel weiterlaufen lassen.
+      for(const s of remoteVisualShots){
+        if(s?.mesh)scene.remove(s.mesh);
+      }
+      remoteVisualShots.length=0;
+    }
+
     updateDrops(dt);
     updateTemporaryWalls(dt);
     updateGrenades(dt);
