@@ -372,7 +372,14 @@ function connectOnline(){
     netSocket.addEventListener("message",ev=>{
       let msg;
       try{ msg=JSON.parse(ev.data); }catch{return;}
-      handleNetMessage(msg);
+
+      // Ein fehlerhaftes Netzwerkpaket darf niemals die restliche
+      // Multiplayer-Verarbeitung oder den Render-Loop abschießen.
+      try{
+        handleNetMessage(msg);
+      }catch(err){
+        console.error("Netzwerk-Nachricht verworfen:",msg?.type,err);
+      }
     });
   }catch(err){
     setOnlineStatus("Verbindung konnte nicht gestartet werden.");
@@ -453,8 +460,24 @@ function handleNetMessage(msg){
 
     if(msg.opponentSpawn){
       const rp=remotePlayers.get(netOpponentId);
-      rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
+      rp.hp=100;
+      rp.maxHp=100;
+      rp.alive=true;
+      rp.obj.position.set(
+        Number(msg.opponentSpawn.x)||0,
+        Number(msg.opponentSpawn.y)||0,
+        Number(msg.opponentSpawn.z)||0
+      );
       rp.obj.visible=true;
+
+      rp.obj.traverse(child=>{
+        if(child.isMesh){
+          child.visible=true;
+          child.frustumCulled=false;
+        }
+      });
+
+      updateHealthBar(rp);
     }
 
     // Schutz vor doppeltem Matchstart / doppelter Super-Auswahl.
@@ -475,13 +498,10 @@ function handleNetMessage(msg){
 
   if(msg.type==="remote_shoot"){
     if(msg.playerId===netPlayerId)return;
-
-    // Dieser Zweig darf ausschließlich Grafik erzeugen.
-    // Ein Fehler hier wird vollständig isoliert und verändert keinen Spielzustand.
     try{
       spawnRemoteShot(msg);
     }catch(err){
-      console.warn("Remote-Tracer verworfen:",err);
+      console.warn("Remote shot verworfen:",err);
     }
     return;
   }
@@ -710,9 +730,15 @@ function applyRemoteState(id,state){
   const rp=remotePlayers.get(id);
   if(!rp || !state)return;
 
-  rp.hp=state.hp;
-  rp.alive=state.alive!==false;
-  rp.obj.visible=rp.alive;
+  const incomingHp=Number(state.hp);
+  if(Number.isFinite(incomingHp))rp.hp=Math.max(0,incomingHp);
+
+  // Nur ein explizites false darf den Gegner unsichtbar machen.
+  // Fehlende/kaputte State-Felder lassen das Modell bestehen.
+  if(state.alive===false)rp.alive=false;
+  else if(state.alive===true)rp.alive=true;
+
+  rp.obj.visible=rp.alive!==false;
 
   const sx=Number(state.x);
   const sy=Number(state.y);
@@ -752,9 +778,11 @@ function sendLocalState(now){
 }
 
 function spawnRemoteShot(msg){
-  // Fremde Online-Schüsse sind ABSOLUT rein visuell.
-  // Kein spawnBullet(), keine Hitbox, kein damagePlayer(), keine Änderung
-  // an roundActive/player.alive/paused/Input.
+  // Gegner-Modell immer sicherstellen – ein Schuss kann vor dem ersten
+  // regulären State-Paket eintreffen.
+  if(msg.playerId)ensureRemotePlayer(msg.playerId);
+  const rp=msg.playerId?remotePlayers.get(msg.playerId):null;
+
   const ox=Number(msg?.origin?.x);
   const oy=Number(msg?.origin?.y);
   const oz=Number(msg?.origin?.z);
@@ -766,46 +794,38 @@ function spawnRemoteShot(msg){
 
   const origin=new THREE.Vector3(ox,oy,oz);
   const dir=new THREE.Vector3(dx,dy,dz);
-
   if(dir.lengthSq()<0.000001)return;
   dir.normalize();
 
-  // Kurzer heller Tracer statt eines echten Projektils.
-  // Damit kann ein empfangener Schuss niemals die Spiellogik des Gegners berühren.
-  const end=origin.clone().add(dir.clone().multiplyScalar(14));
-
-  const geometry=new THREE.BufferGeometry().setFromPoints([origin,end]);
-  const material=new THREE.LineBasicMaterial({
-    color:0xffb15c,
-    transparent:true,
-    opacity:.95
-  });
-
-  const tracer=new THREE.Line(geometry,material);
-  tracer.frustumCulled=false;
-  scene.add(tracer);
-
-  // Kleine Mündungsleuchtkugel am Startpunkt.
-  const flash=new THREE.Mesh(
-    new THREE.SphereGeometry(.09,8,6),
+  // Eigenes rein visuelles Geschoss-System:
+  // NICHT in bullets[], keine Hitbox, kein Schaden, kein Respawn/Input.
+  const color=(msg.weapon==="rifle")?0xff8a3d:0xffd45c;
+  const mesh=new THREE.Mesh(
+    new THREE.SphereGeometry(.075,8,6),
     new THREE.MeshBasicMaterial({
-      color:0xffd08a,
+      color,
       transparent:true,
-      opacity:.9
+      opacity:.95
     })
   );
-  flash.position.copy(origin);
-  flash.frustumCulled=false;
-  scene.add(flash);
 
-  setTimeout(()=>{
-    scene.remove(tracer);
-    scene.remove(flash);
-    geometry.dispose();
-    material.dispose();
-    flash.geometry.dispose();
-    flash.material.dispose();
-  },90);
+  mesh.position.copy(origin);
+  mesh.scale.set(1,1,3.6);
+  mesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0,0,1),
+    dir.clone()
+  );
+  mesh.frustumCulled=false;
+  scene.add(mesh);
+
+  remoteVisualShots.push({
+    mesh,
+    vel:dir.multiplyScalar(Math.max(10,Number(msg.speed)||25)),
+    life:1.6
+  });
+
+  // Sichtbare Schussanimation am Gegner, ohne Spielzustand anzufassen.
+  if(rp)triggerShotAnimation(rp);
 }
 
 function applyRemoteAbility(msg){
@@ -1527,6 +1547,7 @@ function updateHealthBar(entity){
 }
 
 const bullets=[];
+const remoteVisualShots=[];
 const materialDrops=[];
 const keys={};
 
@@ -3306,6 +3327,27 @@ function chainFrom(origin,firstEnemy,damage){
   if(best)damageEnemy(best,damage*.55);
 }
 
+function updateRemoteVisualShots(dt){
+  for(let i=remoteVisualShots.length-1;i>=0;i--){
+    const s=remoteVisualShots[i];
+
+    s.mesh.position.addScaledVector(s.vel,dt);
+    s.life-=dt;
+
+    // Nur Weltkollision für Optik. Kein Spieler-/Schadenscode.
+    if(
+      s.life<=0 ||
+      bulletHitsObstacle(s.mesh.position) ||
+      projectileHitsTemporaryWall(s.mesh.position)
+    ){
+      scene.remove(s.mesh);
+      s.mesh.geometry?.dispose?.();
+      s.mesh.material?.dispose?.();
+      remoteVisualShots.splice(i,1);
+    }
+  }
+}
+
 function updateBullets(dt){
   for(let i=bullets.length-1;i>=0;i--){
     const b=bullets[i];
@@ -3388,9 +3430,6 @@ function updateBullets(dt){
         bullets.splice(i,1);
         continue;
       }
-    }else if(b.owner==="remote"){
-      // Online-Gegnerschüsse sind auf diesem Client rein visuell.
-      // Der Schützen-Client meldet Treffer an den Server.
     }
   }
 }
@@ -3576,6 +3615,7 @@ function loop(now){
     updatePlayer(dt);
     updateEnemies(dt);
     updateBullets(dt);
+    updateRemoteVisualShots(dt);
     updateDrops(dt);
     updateTemporaryWalls(dt);
     updateGrenades(dt);
