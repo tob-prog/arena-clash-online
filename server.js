@@ -173,6 +173,8 @@ wss.on("connection", ws => {
         name: msg.name || "Spieler",
         ws,
         hp: 100,
+        alive: true,
+        money: 0,
         spawnProtectedUntil: 0
       });
 
@@ -182,7 +184,8 @@ wss.on("connection", ws => {
         type: "room_created",
         room: code,
         playerId: ws.playerId,
-        slot: 0
+        slot: 0,
+        money: 0
       });
 
       return;
@@ -224,6 +227,8 @@ wss.on("connection", ws => {
         name: msg.name || "Spieler",
         ws,
         hp: 100,
+        alive: true,
+        money: 0,
         spawnProtectedUntil: Date.now() + 3000
       });
 
@@ -262,6 +267,7 @@ wss.on("connection", ws => {
           existing?.id || null,
 
         slot: 1,
+        money: 0,
 
         spawn: spawn1,
 
@@ -440,59 +446,172 @@ wss.on("connection", ws => {
 
     if (msg.type === "hit") {
 
-      const target =
-        room.players.find(
-          p =>
-            p.id ===
-            msg.targetId
-        );
+      const attacker = room.players.find(p => p.ws === ws);
+      const target = room.players.find(p => p.id === msg.targetId);
 
-      if (!target) {
+      if (!attacker || !target || attacker.id === target.id) return;
+      if (!target.alive) return;
+
+      if ((target.spawnProtectedUntil || 0) > Date.now()) {
         return;
       }
 
+      const damage = Math.max(
+        0,
+        Math.min(
+          200,
+          Number(msg.damage) || 0
+        )
+      );
+
+      const oldHp = target.hp;
+
+      target.hp = Math.max(
+        0,
+        target.hp - damage
+      );
+
+      if (target.hp <= 0) {
+        target.alive = false;
+      }
+
+      broadcastRoom(room, {
+        type: "damage",
+        targetId: target.id,
+        hp: target.hp,
+        damage,
+        alive: target.alive
+      });
+
 
       // ======================================================
-      // 3 SEKUNDEN SPAWNSCHUTZ
+      // KILL + GELD
       // ======================================================
 
       if (
-        (target.spawnProtectedUntil || 0)
-        >
-        Date.now()
+        oldHp > 0 &&
+        target.hp === 0
       ) {
+
+        const reward = 100;
+
+        attacker.money =
+          (attacker.money || 0) +
+          reward;
+
+        broadcastRoom(room, {
+          type: "kill",
+
+          killerId:
+            attacker.id,
+
+          targetId:
+            target.id,
+
+          reward,
+
+          money:
+            attacker.money
+        });
+
+        send(attacker.ws, {
+          type: "money",
+
+          money:
+            attacker.money
+        });
+      }
+
+      return;
+    }
+
+
+    // ========================================================
+    // SHOP PURCHASE
+    // ========================================================
+
+    if (msg.type === "buy_item") {
+
+      const buyer =
+        room.players.find(
+          p => p.ws === ws
+        );
+
+      if (!buyer) {
         return;
       }
 
+      const prices = {
+        medkit: 75,
+        adrenaline: 100,
+        overdrive: 125,
+        ammo: 60
+      };
 
-      const damage =
-        Math.max(
-          0,
-          Math.min(
-            200,
-            Number(msg.damage) || 0
-          )
-        );
+      const itemId =
+        String(msg.itemId || "");
+
+      const price =
+        prices[itemId];
+
+      if (!price) {
+
+        return send(ws, {
+          type:
+            "purchase_failed",
+
+          message:
+            "Unbekanntes Item.",
+
+          money:
+            buyer.money || 0
+        });
+      }
 
 
-      target.hp =
-        Math.max(
-          0,
-          target.hp - damage
-        );
+      // ======================================================
+      // NICHT GENUG GELD
+      // ======================================================
+
+      if (
+        (buyer.money || 0) <
+        price
+      ) {
+
+        return send(ws, {
+          type:
+            "purchase_failed",
+
+          message:
+            `Zu wenig Geld – benötigt $${price}.`,
+
+          money:
+            buyer.money || 0
+        });
+      }
 
 
-      broadcastRoom(room, {
+      // ======================================================
+      // GELD ABZIEHEN
+      // ======================================================
+
+      buyer.money -= price;
+
+
+      // ======================================================
+      // KAUF BESTÄTIGEN
+      // ======================================================
+
+      send(ws, {
         type:
-          "damage",
+          "item_purchased",
 
-        targetId:
-          target.id,
+        itemId,
 
-        hp:
-          target.hp,
+        price,
 
-        damage
+        money:
+          buyer.money
       });
 
       return;
@@ -521,9 +640,12 @@ wss.on("connection", ws => {
 
 
       player.hp = 100;
+      player.alive = true;
 
 
-      // 3 Sekunden Spawnschutz
+      // ======================================================
+      // 3 SEKUNDEN SPAWNSCHUTZ
+      // ======================================================
 
       player.spawnProtectedUntil =
         Date.now() + 3000;
@@ -552,6 +674,10 @@ wss.on("connection", ws => {
               z: 6
             };
 
+
+      // ======================================================
+      // RESPAWN AN BEIDE SENDEN
+      // ======================================================
 
       broadcastRoom(room, {
         type:
@@ -586,6 +712,7 @@ wss.on("connection", ws => {
 // ============================================================
 
 server.listen(PORT, () => {
+
   console.log(
     `Arena Clash Online läuft auf Port ${PORT}`
   );
