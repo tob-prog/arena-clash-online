@@ -43,11 +43,21 @@ const server = http.createServer((req, res) => {
   });
 });
 
+
+// ============================================================
+// WEBSOCKET SERVER
+// ============================================================
+
 const wss = new WebSocket.Server({ server });
 
 const rooms = new Map();
 
 let nextPlayerId = 1;
+
+
+// ============================================================
+// ROOM CODE
+// ============================================================
 
 function makeRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -63,19 +73,34 @@ function makeRoomCode() {
     : code;
 }
 
+
+// ============================================================
+// SEND
+// ============================================================
+
 function send(ws, obj) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
 }
 
+
+// ============================================================
+// BROADCAST
+// ============================================================
+
 function broadcastRoom(room, obj, except = null) {
-  for (const player of room.players) {
-    if (player.ws !== except) {
-      send(player.ws, obj);
+  for (const p of room.players) {
+    if (p.ws !== except) {
+      send(p.ws, obj);
     }
   }
 }
+
+
+// ============================================================
+// REMOVE PLAYER
+// ============================================================
 
 function removePlayer(ws) {
   if (!ws.roomCode) {
@@ -88,12 +113,12 @@ function removePlayer(ws) {
     return;
   }
 
-  const index = room.players.findIndex(
-    player => player.ws === ws
+  const idx = room.players.findIndex(
+    p => p.ws === ws
   );
 
-  if (index >= 0) {
-    const [left] = room.players.splice(index, 1);
+  if (idx >= 0) {
+    const [left] = room.players.splice(idx, 1);
 
     broadcastRoom(room, {
       type: "opponent_left",
@@ -106,10 +131,17 @@ function removePlayer(ws) {
   }
 }
 
+
+// ============================================================
+// CONNECTION
+// ============================================================
+
 wss.on("connection", ws => {
+
   ws.playerId = "P" + nextPlayerId++;
 
   ws.on("message", raw => {
+
     let msg;
 
     try {
@@ -118,7 +150,13 @@ wss.on("connection", ws => {
       return;
     }
 
+
+    // ========================================================
+    // CREATE ROOM
+    // ========================================================
+
     if (msg.type === "create_room") {
+
       removePlayer(ws);
 
       const code = makeRoomCode();
@@ -134,7 +172,8 @@ wss.on("connection", ws => {
         id: ws.playerId,
         name: msg.name || "Spieler",
         ws,
-        hp: 100
+        hp: 100,
+        spawnProtectedUntil: 0
       });
 
       ws.roomCode = code;
@@ -142,13 +181,20 @@ wss.on("connection", ws => {
       send(ws, {
         type: "room_created",
         room: code,
-        playerId: ws.playerId
+        playerId: ws.playerId,
+        slot: 0
       });
 
       return;
     }
 
+
+    // ========================================================
+    // JOIN ROOM
+    // ========================================================
+
     if (msg.type === "join_room") {
+
       removePlayer(ws);
 
       const code = String(
@@ -177,46 +223,149 @@ wss.on("connection", ws => {
         id: ws.playerId,
         name: msg.name || "Spieler",
         ws,
-        hp: 100
+        hp: 100,
+        spawnProtectedUntil: Date.now() + 3000
       });
 
       ws.roomCode = code;
 
+
+      // ======================================================
+      // FESTE SPAWNPUNKTE
+      // ======================================================
+
+      const spawn0 = {
+        x: -30,
+        y: 0,
+        z: -6
+      };
+
+      const spawn1 = {
+        x: 30,
+        y: 0,
+        z: 6
+      };
+
+
+      // ======================================================
+      // SPIELER 2 INFORMIEREN
+      // ======================================================
+
       send(ws, {
         type: "room_joined",
+
         room: code,
+
         playerId: ws.playerId,
-        opponentId: existing?.id || null
+
+        opponentId:
+          existing?.id || null,
+
+        slot: 1,
+
+        spawn: spawn1,
+
+        opponentSpawn: spawn0
       });
 
+
+      // ======================================================
+      // MATCH STARTEN
+      // ======================================================
+
       if (existing) {
+
+        existing.spawnProtectedUntil =
+          Date.now() + 3000;
+
+
+        // Spieler 1 erfährt,
+        // dass Spieler 2 verbunden ist
+
         send(existing.ws, {
           type: "opponent_joined",
-          playerId: ws.playerId
+
+          playerId:
+            ws.playerId,
+
+          opponentSpawn:
+            spawn1
         });
+
+
+        // ====================================================
+        // SPIELER 1 START
+        // ====================================================
+
+        send(existing.ws, {
+          type: "match_start",
+
+          opponentId:
+            ws.playerId,
+
+          slot: 0,
+
+          spawn:
+            spawn0,
+
+          opponentSpawn:
+            spawn1
+        });
+
+
+        // ====================================================
+        // SPIELER 2 START
+        // ====================================================
 
         send(ws, {
           type: "match_start",
-          opponentId: existing.id
+
+          opponentId:
+            existing.id,
+
+          slot: 1,
+
+          spawn:
+            spawn1,
+
+          opponentSpawn:
+            spawn0
         });
       }
 
       return;
     }
 
-    const room = rooms.get(ws.roomCode);
+
+    // ========================================================
+    // GET CURRENT ROOM
+    // ========================================================
+
+    const room = rooms.get(
+      ws.roomCode
+    );
 
     if (!room) {
       return;
     }
 
+
+    // ========================================================
+    // PLAYER STATE
+    // ========================================================
+
     if (msg.type === "state") {
+
       broadcastRoom(
         room,
         {
           type: "state",
-          playerId: ws.playerId,
-          state: msg.state
+
+          playerId:
+            ws.playerId,
+
+          state:
+            msg.state
         },
         ws
       );
@@ -224,17 +373,35 @@ wss.on("connection", ws => {
       return;
     }
 
+
+    // ========================================================
+    // SHOOT
+    // ========================================================
+
     if (msg.type === "shoot") {
+
       broadcastRoom(
         room,
         {
           type: "remote_shoot",
-          playerId: ws.playerId,
-          origin: msg.origin,
-          dir: msg.dir,
-          damage: msg.damage,
-          speed: msg.speed,
-          weapon: msg.weapon
+
+          playerId:
+            ws.playerId,
+
+          origin:
+            msg.origin,
+
+          dir:
+            msg.dir,
+
+          damage:
+            msg.damage,
+
+          speed:
+            msg.speed,
+
+          weapon:
+            msg.weapon
         },
         ws
       );
@@ -242,12 +409,22 @@ wss.on("connection", ws => {
       return;
     }
 
+
+    // ========================================================
+    // ABILITY
+    // ========================================================
+
     if (msg.type === "ability") {
+
       broadcastRoom(
         room,
         {
-          type: "remote_ability",
-          playerId: ws.playerId,
+          type:
+            "remote_ability",
+
+          playerId:
+            ws.playerId,
+
           ...msg
         },
         ws
@@ -256,72 +433,157 @@ wss.on("connection", ws => {
       return;
     }
 
+
+    // ========================================================
+    // HIT
+    // ========================================================
+
     if (msg.type === "hit") {
-      const target = room.players.find(
-        player => player.id === msg.targetId
-      );
+
+      const target =
+        room.players.find(
+          p =>
+            p.id ===
+            msg.targetId
+        );
 
       if (!target) {
         return;
       }
 
-      const damage = Math.max(
-        0,
-        Math.min(
-          200,
-          Number(msg.damage) || 0
-        )
-      );
 
-      target.hp = Math.max(
-        0,
-        target.hp - damage
-      );
+      // ======================================================
+      // 3 SEKUNDEN SPAWNSCHUTZ
+      // ======================================================
+
+      if (
+        (target.spawnProtectedUntil || 0)
+        >
+        Date.now()
+      ) {
+        return;
+      }
+
+
+      const damage =
+        Math.max(
+          0,
+          Math.min(
+            200,
+            Number(msg.damage) || 0
+          )
+        );
+
+
+      target.hp =
+        Math.max(
+          0,
+          target.hp - damage
+        );
+
 
       broadcastRoom(room, {
-        type: "damage",
-        targetId: target.id,
-        hp: target.hp,
+        type:
+          "damage",
+
+        targetId:
+          target.id,
+
+        hp:
+          target.hp,
+
         damage
       });
 
       return;
     }
 
-    if (msg.type === "request_respawn") {
-      const player = room.players.find(
-        player => player.id === ws.playerId
-      );
+
+    // ========================================================
+    // RESPAWN
+    // ========================================================
+
+    if (
+      msg.type ===
+      "request_respawn"
+    ) {
+
+      const player =
+        room.players.find(
+          p =>
+            p.id ===
+            ws.playerId
+        );
 
       if (!player) {
         return;
       }
 
+
       player.hp = 100;
 
-      const slot = room.players.findIndex(
-        player => player.id === ws.playerId
-      );
 
-      const position =
+      // 3 Sekunden Spawnschutz
+
+      player.spawnProtectedUntil =
+        Date.now() + 3000;
+
+
+      const slot =
+        room.players.findIndex(
+          p =>
+            p.id ===
+            player.id
+        );
+
+
+      const pos =
         slot === 0
-          ? { x: -30, y: 0, z: -6 }
-          : { x: 30, y: 0, z: 6 };
+
+          ? {
+              x: -30,
+              y: 0,
+              z: -6
+            }
+
+          : {
+              x: 30,
+              y: 0,
+              z: 6
+            };
+
 
       broadcastRoom(room, {
-        type: "respawn",
-        playerId: player.id,
-        position
+        type:
+          "respawn",
+
+        playerId:
+          player.id,
+
+        position:
+          pos
       });
 
       return;
     }
   });
 
-  ws.on("close", () => {
-    removePlayer(ws);
-  });
+
+  // ==========================================================
+  // DISCONNECT
+  // ==========================================================
+
+  ws.on(
+    "close",
+    () =>
+      removePlayer(ws)
+  );
 });
+
+
+// ============================================================
+// START SERVER
+// ============================================================
 
 server.listen(PORT, () => {
   console.log(
