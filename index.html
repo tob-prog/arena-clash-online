@@ -358,6 +358,7 @@ function handleNetMessage(msg){
   if(msg.type==="room_created"){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
+    netSlot=0;
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
     setOnlineStatus("Raum erstellt. Warte auf deinen Freund …");
@@ -369,6 +370,8 @@ function handleNetMessage(msg){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
     netOpponentId=msg.opponentId||null;
+    netSlot=1;
+    if(netOpponentId)ensureRemotePlayer(netOpponentId);
     setOnlineStatus("Raum beigetreten.");
     setOnlineBadge(`Raum ${msg.room}`);
     return;
@@ -376,6 +379,7 @@ function handleNetMessage(msg){
 
   if(msg.type==="opponent_joined"){
     netOpponentId=msg.playerId;
+    ensureRemotePlayer(netOpponentId);
     setOnlineStatus("Freund verbunden – Spiel startet.");
     beginOnlineMatch();
     return;
@@ -383,6 +387,7 @@ function handleNetMessage(msg){
 
   if(msg.type==="match_start"){
     netOpponentId=msg.opponentId;
+    ensureRemotePlayer(netOpponentId);
     beginOnlineMatch();
     return;
   }
@@ -470,6 +475,15 @@ function beginOnlineMatch(){
   showStartChoice();
 
   player.spawnProtect=3;
+
+  // Deterministic opposite starting positions so both players never begin stacked.
+  const spawn=netSlot===1
+    ? new THREE.Vector3(30,0,6)
+    : new THREE.Vector3(-30,0,-6);
+  player.obj.position.copy(spawn);
+  player.yVel=0;
+  player.onGround=true;
+
   setOnlineBadge(`Online 1v1 – ${netRoom}`);
 }
 
@@ -551,6 +565,7 @@ function sendLocalState(now){
 }
 
 function spawnRemoteShot(msg){
+  ensureRemotePlayer(msg.playerId);
   const rp=remotePlayers.get(msg.playerId);
   if(!rp)return;
 
@@ -2870,6 +2885,10 @@ function loop(now){
     updateTemporaryWalls(dt);
     updateGrenades(dt);
     updateCamera(dt);
+
+    // Multiplayer state must be sent continuously; without this the opponent model
+    // never receives a position and remote shots may arrive before a remote player exists.
+    sendLocalState(now);
 
     for(const rp of remotePlayers.values()){
       if(rp.spawnProtect>0)rp.spawnProtect=Math.max(0,rp.spawnProtect-dt);
