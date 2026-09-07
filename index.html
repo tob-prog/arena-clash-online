@@ -19,8 +19,49 @@ canvas{display:block;cursor:crosshair}
  position:fixed;z-index:10;background:rgba(0,0,0,.5);backdrop-filter:blur(5px);
  border-radius:12px;padding:12px 14px;line-height:1.45;pointer-events:none
 }
-#ui{left:14px;top:14px;min-width:280px}
+#ui{left:14px;top:14px;min-width:300px}
 #help{right:14px;top:14px;font-size:13px}
+#healthHud{margin-top:7px}
+#healthTrack{
+  width:100%;height:13px;border-radius:999px;overflow:hidden;
+  background:rgba(255,255,255,.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)
+}
+#healthFill{
+  height:100%;width:100%;
+  background:linear-gradient(90deg,#33d06b,#98e34f);
+  transform-origin:left center;transition:width .16s ease
+}
+#ammoHud{margin-top:9px}
+#ammoSegments{display:flex;gap:3px;flex-wrap:wrap;max-width:300px;margin-top:5px}
+.ammoSeg{
+  width:6px;height:15px;border-radius:2px;background:#ffd76a;
+  box-shadow:0 0 4px rgba(255,215,106,.28)
+}
+.ammoSeg.spent{background:rgba(255,255,255,.14);box-shadow:none}
+#reloadTrack{
+  display:none;width:100%;height:6px;border-radius:999px;overflow:hidden;
+  background:rgba(255,255,255,.12);margin-top:6px
+}
+#reloadFill{height:100%;width:0;background:#65b8ff}
+#spawnProtectionFx{
+  position:fixed;inset:0;z-index:35;pointer-events:none;display:none;
+  align-items:center;justify-content:center;
+  box-shadow:inset 0 0 90px 25px rgba(89,184,255,.32);
+  animation:spawnPulse .55s ease-in-out infinite alternate;
+}
+#spawnProtectionFx .spawnRing{
+  width:220px;height:220px;border-radius:50%;
+  border:3px solid rgba(124,208,255,.65);
+  box-shadow:0 0 40px rgba(89,184,255,.5),inset 0 0 35px rgba(89,184,255,.18);
+}
+#spawnProtectionText{
+  position:absolute;top:22%;font-weight:900;font-size:19px;letter-spacing:.06em;
+  text-shadow:0 2px 8px #000
+}
+@keyframes spawnPulse{
+  from{opacity:.5;transform:scale(.985)}
+  to{opacity:1;transform:scale(1)}
+}
 #superWrap{width:220px;height:18px;border:2px solid white;border-radius:999px;overflow:hidden;margin-top:8px}
 #superBar{height:100%;width:0;background:linear-gradient(90deg,#6f2cff,#d24cff)}
 #roundBanner{
@@ -167,6 +208,12 @@ canvas{display:block;cursor:crosshair}
   <div><b>Material:</b> <span id="materials">0</span> ✦</div>
   <div id="score"><b>Kills:</b> 0 | <b>Tode:</b> 0</div>
   <div id="hp">HP: 100 / 100</div>
+  <div id="healthHud"><div id="healthTrack"><div id="healthFill"></div></div></div>
+  <div id="ammoHud">
+    <div id="ammoText">Magazin: 16 / 16</div>
+    <div id="ammoSegments"></div>
+    <div id="reloadTrack"><div id="reloadFill"></div></div>
+  </div>
   <div id="dash">Dash: bereit</div>
   <div id="jumpState">Sprung: bereit</div>
   <div id="weaponState">Waffe: Standard-Blaster</div></div>
@@ -180,12 +227,17 @@ canvas{display:block;cursor:crosshair}
   Strg = Dash<br>
   Leertaste = Springen<br>
   E = Super-Ability<br>
-  H = Hitbox-Debug<br>  R = Neustart<br><br>
+  H = Hitbox-Debug<br>
+  R = Nachladen<br><br>
   <span id="inputState">Input: Klick ins Spiel</span><br><span id="shotDebug">Schüsse erkannt: 0</span><br><span id="moveState">Tempo: Stillstand</span><br><span id="superState">Super: nicht gewählt</span>
 </div>
 
 <div id="roundBanner"></div>
 <div id="crosshair"></div>
+<div id="spawnProtectionFx">
+  <div id="spawnProtectionText">SPAWNSCHUTZ 3.0s</div>
+  <div class="spawnRing"></div>
+</div>
 
 
 <div id="startChoice">
@@ -306,11 +358,6 @@ function handleNetMessage(msg){
   if(msg.type==="room_created"){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
-
-    // Host starts on the left side.
-    player.obj.position.set(-30,0,-6);
-    player.yVel=0;
-    player.onGround=true;
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
     setOnlineStatus("Raum erstellt. Warte auf deinen Freund …");
@@ -322,11 +369,6 @@ function handleNetMessage(msg){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
     netOpponentId=msg.opponentId||null;
-
-    // Joining player starts on the opposite side.
-    player.obj.position.set(30,0,6);
-    player.yVel=0;
-    player.onGround=true;
     setOnlineStatus("Raum beigetreten.");
     setOnlineBadge(`Raum ${msg.room}`);
     return;
@@ -334,12 +376,6 @@ function handleNetMessage(msg){
 
   if(msg.type==="opponent_joined"){
     netOpponentId=msg.playerId;
-    ensureRemotePlayer(netOpponentId);
-
-    // Host knows where the joining player initially starts.
-    const rp=remotePlayers.get(netOpponentId);
-    if(rp)rp.obj.position.set(30,0,6);
-
     setOnlineStatus("Freund verbunden – Spiel startet.");
     beginOnlineMatch();
     return;
@@ -347,12 +383,6 @@ function handleNetMessage(msg){
 
   if(msg.type==="match_start"){
     netOpponentId=msg.opponentId;
-    ensureRemotePlayer(netOpponentId);
-
-    // Joiner knows where the host initially starts.
-    const rp=remotePlayers.get(netOpponentId);
-    if(rp)rp.obj.position.set(-30,0,-6);
-
     beginOnlineMatch();
     return;
   }
@@ -379,6 +409,7 @@ function handleNetMessage(msg){
 
   if(msg.type==="damage"){
     if(msg.targetId===netPlayerId){
+      if((player.spawnProtect||0)>0)return;
       player.hp=Math.max(0,msg.hp);
       if(player.hp<=0 && player.alive){
         player.alive=false;
@@ -392,13 +423,20 @@ function handleNetMessage(msg){
     if(msg.playerId===netPlayerId){
       player.hp=player.maxHp;
       player.alive=true;
+      player.spawnProtect=3;
+      player.reloading=false;
+      player.reloadTimer=0;
+      player.ammo=player.magSize;
       player.obj.position.set(msg.position.x,msg.position.y,msg.position.z);
     }else{
       ensureRemotePlayer(msg.playerId);
       const rp=remotePlayers.get(msg.playerId);
       rp.hp=100;
+      rp.spawnProtect=3;
       rp.obj.position.set(msg.position.x,msg.position.y,msg.position.z);
       rp.obj.visible=true;
+      if(rp.shieldBubble)rp.shieldBubble.visible=true;
+      updateHealthBar(rp);
     }
     return;
   }
@@ -431,35 +469,45 @@ function beginOnlineMatch(){
   // Re-bind and show the clickable super selection.
   showStartChoice();
 
+  player.spawnProtect=3;
   setOnlineBadge(`Online 1v1 – ${netRoom}`);
 }
 
 function ensureRemotePlayer(id){
   if(remotePlayers.has(id))return;
 
-  const obj=makeFighter(0xe04b4b,.62);
+  const obj=makeFighter(0x2f6fa8,.62);
   obj.position.set(8,0,8);
-  obj.visible=true;
-
-  obj.traverse(child=>{
-    if(child.isMesh){
-      child.visible=true;
-      child.castShadow=true;
-      child.receiveShadow=true;
-    }
-  });
-
   scene.add(obj);
 
-  remotePlayers.set(id,{
+  const rp={
     obj,
     hp:100,
     maxHp:100,
     yaw:0,
     pitch:0,
     weapon:"rifle",
-    alive:true
-  });
+    alive:true,
+    spawnProtect:0,
+    healthBar:null,
+    shieldBubble:null
+  };
+
+  attachHealthBar(rp);
+
+  const shieldBubble=new THREE.Mesh(
+    new THREE.SphereGeometry(1.05,20,14),
+    new THREE.MeshBasicMaterial({
+      color:0x62c7ff,transparent:true,opacity:.18,
+      depthWrite:false,side:THREE.DoubleSide
+    })
+  );
+  shieldBubble.position.y=1.05;
+  shieldBubble.visible=false;
+  obj.add(shieldBubble);
+  rp.shieldBubble=shieldBubble;
+
+  remotePlayers.set(id,rp);
 }
 
 function applyRemoteState(id,state){
@@ -470,34 +518,19 @@ function applyRemoteState(id,state){
   rp.alive=state.alive!==false;
   rp.obj.visible=rp.alive;
 
-  let remoteY=Number(state.y)||0;
-
-  // Avoid tiny network/physics offsets making the remote model hover.
-  if(Math.abs(remoteY)<.04)remoteY=0;
-
-  const target=new THREE.Vector3(state.x,remoteY,state.z);
-
-  // First valid update snaps; following updates interpolate.
-  if(!rp.hasNetState){
-    rp.obj.position.copy(target);
-    rp.hasNetState=true;
-  }else{
-    rp.obj.position.lerp(target,.42);
-  }
-
+  rp.obj.position.set(state.x,state.y,state.z);
   rp.obj.rotation.y=state.yaw||0;
   rp.weapon=state.weapon||"rifle";
+  rp.spawnProtect=Math.max(0,Number(state.spawnProtect)||0);
+  if(rp.shieldBubble){
+    rp.shieldBubble.visible=rp.alive && rp.spawnProtect>0;
+    rp.shieldBubble.material.opacity=.12+.10*(.5+.5*Math.sin(performance.now()*.012));
+  }
+  updateHealthBar(rp);
 }
 
 function sendLocalState(now){
   if(!netReady || !netConnected)return;
-
-  if(netOpponentId){
-    const rp=remotePlayers.get(netOpponentId);
-    setOnlineBadge(
-      `Online 1v1 – ${netRoom} – Gegner: ${rp && rp.hasNetState ? "sichtbar" : "verbunden"}`
-    );
-  }
   if(now-lastNetSend<50)return;
   lastNetSend=now;
 
@@ -510,6 +543,7 @@ function sendLocalState(now){
       pitch,
       hp:player.hp,
       alive:player.alive,
+      spawnProtect:Math.max(0,player.spawnProtect||0),
       weapon:WEAPONS[currentWeaponIndex]?.id||"rifle",
       super:selectedSuper
     }
@@ -524,7 +558,9 @@ function spawnRemoteShot(msg){
   const dir=new THREE.Vector3(msg.dir.x,msg.dir.y,msg.dir.z).normalize();
 
   const fakeOrigin={position:origin};
-  spawnBullet(fakeOrigin,origin.clone().add(dir.multiplyScalar(120)),msg.speed||25,msg.damage||17,"enemy",origin);
+  const target=origin.clone().add(dir.clone().multiplyScalar(120));
+  spawnBullet(fakeOrigin,target,msg.speed||25,msg.damage||17,"enemy",0,true);
+  triggerShotAnimation(rp);
 }
 
 function applyRemoteAbility(msg){
@@ -578,6 +614,29 @@ document.getElementById("joinRoomBtn").onclick=()=>{
   if(room.length<4)return setOnlineStatus("Bitte Raumcode eingeben.");
   sendNet("join_room",{name,room});
 };
+
+
+const roomInput=document.getElementById("roomCodeInput");
+if(roomInput){
+  roomInput.addEventListener("input",()=>{
+    roomInput.value=roomInput.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6);
+  });
+  roomInput.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      document.getElementById("joinRoomBtn")?.click();
+    }
+  });
+}
+const nameInput=document.getElementById("playerNameInput");
+if(nameInput){
+  nameInput.addEventListener("keydown",e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      roomInput?.focus();
+    }
+  });
+}
 
 connectOnline();
 // ====================================================================
@@ -851,11 +910,12 @@ const player={
   obj:makeFighter(0x2e86ff),
   hp:100,maxHp:100,speed:4.2,sprintSpeed:6.8,
   fireCd:0,dashCd:0,dashTimer:0,dashDir:new THREE.Vector3(),
-  kills:0,deaths:0,alive:true,respawn:0,
+  kills:0,deaths:0,alive:true,respawn:0,spawnProtect:0,
   yVel:0,onGround:true,radius:.65,
   // weapon stats
   weaponName:"Pistole",
   damage:30, fireRate:.42, bulletSpeed:20, multishot:1, spread:0,
+  ammo:16, magSize:16, reloading:false, reloadTimer:0, reloadDuration:1.25,
   pierce:0, explosive:false, lifesteal:0, chain:false,
   critChance:0, critMult:2, burn:false,
   // abilities
@@ -876,17 +936,21 @@ const WEAPONS=[
     bulletSpeed:21,
     multishot:1,
     spread:0,
-    model:"pistol"
+    model:"pistol",
+    magSize:16,
+    reloadDuration:1.25
   },
   {
     id:"rifle",
     name:"Sturmgewehr",
     damage:17,
-    fireRate:.12,
+    fireRate:.15,
     bulletSpeed:25,
     multishot:1,
     spread:.018,
-    model:"rifle"
+    model:"rifle",
+    magSize:30,
+    reloadDuration:1.7
   }
 ];
 
@@ -909,6 +973,11 @@ function applyWeapon(index){
   player.bulletSpeed=w.bulletSpeed+weaponMods.bulletSpeedFlat;
   player.multishot=weaponMods.multishotOverride ?? w.multishot;
   player.spread=weaponMods.spreadOverride ?? w.spread;
+  player.magSize=w.magSize;
+  player.ammo=w.magSize;
+  player.reloadDuration=w.reloadDuration;
+  player.reloading=false;
+  player.reloadTimer=0;
 
   updateFirstPersonWeaponModel(w.model);
 
@@ -1204,31 +1273,6 @@ let mouseInside=false;
 let lastMouseX=null;
 let lastMouseY=null;
 
-let pointerLocked=false;
-
-function requestGamePointerLock(){
-  if(!netReady || paused || shopOpen)return;
-  if(document.pointerLockElement===renderer.domElement)return;
-  renderer.domElement.requestPointerLock?.();
-}
-
-function releaseGamePointerLock(){
-  if(document.pointerLockElement){
-    document.exitPointerLock?.();
-  }
-}
-
-document.addEventListener("pointerlockchange",()=>{
-  pointerLocked=document.pointerLockElement===renderer.domElement;
-  const el=document.getElementById("inputState");
-  if(el){
-    el.textContent=pointerLocked
-      ? "Input: Maus gesperrt | ESC = Menü"
-      : "Input: Maus frei | ins Spiel klicken";
-  }
-});
-
-
 // Direkte Maussteuerung ohne Pointer Lock:
 // Jede echte Mausbewegung dreht die Kamera.
 // Das Fadenkreuz bleibt exakt in der Bildschirmmitte und entspricht der Blick-/Schussrichtung.
@@ -1250,16 +1294,8 @@ renderer.domElement.addEventListener("mouseleave",()=>{
 });
 
 renderer.domElement.addEventListener("mousemove",e=>{
-  if(paused || shopOpen)return;
+  if(paused || shopOpen || !mouseInside)return;
 
-  if(pointerLocked){
-    yaw-=e.movementX*.0026;
-    pitch-=e.movementY*.0023;
-    pitch=clamp(pitch,-1.22,1.02);
-    return;
-  }
-
-  if(!mouseInside)return;
   if(lastMouseX===null || lastMouseY===null){
     lastMouseX=e.clientX;
     lastMouseY=e.clientY;
@@ -1268,12 +1304,20 @@ renderer.domElement.addEventListener("mousemove",e=>{
 
   const dx=e.clientX-lastMouseX;
   const dy=e.clientY-lastMouseY;
+
   lastMouseX=e.clientX;
   lastMouseY=e.clientY;
 
-  yaw-=dx*.0030;
-  pitch-=dy*.0026;
+  // Niedrige, direkte FPS-Sensitivität.
+  const sensitivityX=.0030;
+  const sensitivityY=.0026;
+
+  yaw -= dx*sensitivityX;
+  pitch -= dy*sensitivityY;
   pitch=clamp(pitch,-1.22,1.02);
+
+  const el=document.getElementById("inputState");
+  if(el)el.textContent="Input: Direktes Umsehen";
 });
 
 // Linksklick schießt direkt in die Blickrichtung/Fadenkreuzmitte.
@@ -1281,12 +1325,6 @@ renderer.domElement.addEventListener("mousedown",e=>{
   if(paused || shopOpen)return;
 
   renderer.domElement.focus({preventScroll:true});
-
-  if(netReady && !pointerLocked){
-    e.preventDefault();
-    requestGamePointerLock();
-    return;
-  }
 
   if(e.button===0){
     e.preventDefault();
@@ -1315,6 +1353,12 @@ renderer.domElement.addEventListener("wheel",e=>{
 },{passive:false});
 
 window.addEventListener("keydown",e=>{
+  const active=document.activeElement;
+  const typing=active && (active.tagName==="INPUT" || active.tagName==="TEXTAREA" || active.isContentEditable);
+  const lobby=document.getElementById("onlineLobby");
+  const lobbyOpen=lobby && getComputedStyle(lobby).display!=="none";
+  if(typing || lobbyOpen)return;
+
   const key=(e.key||"").toLowerCase();
   const code=(e.code||"").toLowerCase();
 
@@ -1347,11 +1391,11 @@ window.addEventListener("keydown",e=>{
     if(mapKey==="space")tryJump();
     if(mapKey==="e")tryUseSuper();
     if(mapKey==="h")toggleHitboxDebug();
+    if(mapKey==="r")startReload();
   }
 
   keys[mapKey]=true;
 
-  if(mapKey==="r")restart();
 
   if(["w","a","s","d","shift","ctrl","space","e"].includes(mapKey)){
     e.preventDefault();
@@ -1387,11 +1431,9 @@ function pauseGame(){
   lastMouseX=null;
   lastMouseY=null;
   renderer.domElement.style.cursor="default";
-  releaseGamePointerLock();
 
   document.getElementById("pauseMenu").style.display="flex";
-  document.getElementById("inputState").textContent=
-    netReady ? "Menü offen – Online-Spiel läuft weiter" : "Input: pausiert";
+  document.getElementById("inputState").textContent="Input: pausiert";
 }
 
 function resumeGame(){
@@ -1401,15 +1443,16 @@ function resumeGame(){
   renderer.domElement.focus({preventScroll:true});
   lastMouseX=null;
   lastMouseY=null;
-  renderer.domElement.style.cursor="none";
+  if(mouseInside)renderer.domElement.style.cursor="none";
 
-  document.getElementById("inputState").textContent=
-    netReady ? "Input: Maus wird gesperrt …" : "Input: Maus bewegen | Linksklick schießen";
+  // Must be called directly from the user click/key event where possible.
+  renderer.domElement.focus({preventScroll:true});
+
+  document.getElementById("inputState").textContent="Input: Maus bewegen | Linksklick schießen";
 }
 
 document.getElementById("resumeBtn").addEventListener("click",()=>{
   resumeGame();
-  requestGamePointerLock();
 });
 
 
@@ -1592,7 +1635,7 @@ function moveEntity(obj,delta,r=.6){
   }
 }
 
-function getSurfaceHeightAt(x,z,r=.4,maxStepUp=.32,currentY=0){
+function getSurfaceHeightAt(x,z,r=.4){
   let h=0;
   const probe=new THREE.Vector3(x,0,z);
 
@@ -1603,15 +1646,7 @@ function getSurfaceHeightAt(x,z,r=.4,maxStepUp=.32,currentY=0){
 
     if(Math.abs(local.x)<=half.x+r &&
        Math.abs(local.z)<=half.z+r){
-
-      const top=mesh.position.y+half.y;
-
-      // CRITICAL:
-      // Do not treat the top of a wall/crate as ground when the
-      // player merely touches it from the side.
-      if(top<=currentY+maxStepUp){
-        h=Math.max(h,top);
-      }
+      h=Math.max(h,mesh.position.y+half.y);
     }
   }
 
@@ -1661,8 +1696,16 @@ function spawnBullet(ownerObj,target,speed,damage,owner,angleOffset=0,exactOrigi
   });
 }
 
+function startReload(){
+  if(!player.alive || !roundActive || player.reloading || player.ammo>=player.magSize)return;
+  player.reloading=true;
+  player.reloadTimer=player.reloadDuration;
+  mouseHeld=false;
+}
+
 function shootPlayer(){
-  if(!player.alive || player.fireCd>0 || !roundActive)return;
+  if(!player.alive || player.fireCd>0 || !roundActive || player.reloading)return;
+  if(player.ammo<=0){ startReload(); return; }
   updateAimPoint();
 
   const muzzleWorld=new THREE.Vector3();
@@ -1687,6 +1730,20 @@ function shootPlayer(){
       true
     );
   }
+
+  if(netReady && netOpponentId){
+    const dir=aimPoint.clone().sub(muzzleWorld).normalize();
+    sendNet("shoot",{
+      origin:{x:muzzleWorld.x,y:muzzleWorld.y,z:muzzleWorld.z},
+      dir:{x:dir.x,y:dir.y,z:dir.z},
+      speed:player.bulletSpeed,
+      damage:player.damage,
+      weapon:WEAPONS[currentWeaponIndex]?.id||"pistol"
+    });
+  }
+
+  player.ammo=Math.max(0,player.ammo-1);
+  if(player.ammo===0) setTimeout(()=>{ if(player.ammo===0) startReload(); },120);
 
   fpGun.position.z=.16;
   muzzleFlash.intensity=4;
@@ -1956,7 +2013,6 @@ function showStartChoice(){
       document.querySelectorAll("#startCards .choiceCard").forEach(c=>c.disabled=true);
 
       selectedSuper=sup.id;
-      if(netReady)requestGamePointerLock();
       superCooldownMax=sup.cooldown;
       superCooldown=0;
       player.starterAbility=sup.name;
@@ -2126,19 +2182,8 @@ function updateVertical(dt){
   if(!player.alive)return;
   player.yVel+=GRAVITY*dt;
   let nextY=player.obj.position.y+player.yVel*dt;
-  const surface=getSurfaceHeightAt(
-    player.obj.position.x,
-    player.obj.position.z,
-    player.radius*.7,
-    .32,
-    player.obj.position.y
-  );
-
-  if(nextY<=surface){
-    nextY=surface;
-    player.yVel=0;
-    player.onGround=true;
-  }
+  const surface=getSurfaceHeightAt(player.obj.position.x,player.obj.position.z,player.radius*.7);
+  if(nextY<=surface){nextY=surface;player.yVel=0;player.onGround=true;}
   else player.onGround=false;
   player.obj.position.y=nextY;
 }
@@ -2421,12 +2466,22 @@ function toggleHitboxDebug(){
 }
 
 function updatePlayer(dt){
-  if(paused && netReady){
-    player.fireCd=Math.max(0,player.fireCd-dt);
-    player.dashCd=Math.max(0,player.dashCd-dt);
-    return;
-  }
   player.fireCd=Math.max(0,player.fireCd-dt);
+  player.spawnProtect=Math.max(0,(player.spawnProtect||0)-dt);
+
+  const spawnFx=document.getElementById("spawnProtectionFx");
+  const spawnTxt=document.getElementById("spawnProtectionText");
+  if(spawnFx){
+    spawnFx.style.display=player.alive && player.spawnProtect>0?"flex":"none";
+    if(spawnTxt && player.spawnProtect>0)spawnTxt.textContent=`SPAWNSCHUTZ ${player.spawnProtect.toFixed(1)}s`;
+  }
+  if(player.reloading){
+    player.reloadTimer=Math.max(0,player.reloadTimer-dt);
+    if(player.reloadTimer<=0){
+      player.reloading=false;
+      player.ammo=player.magSize;
+    }
+  }
   superCooldown=Math.max(0,superCooldown-dt);
   player.dashCd=Math.max(0,player.dashCd-dt);
 
@@ -2571,7 +2626,7 @@ function updateBullets(dt){
       // Online 1v1 opponent hit detection.
       if(netReady && netOpponentId && remotePlayers.has(netOpponentId)){
         const rp=remotePlayers.get(netOpponentId);
-        if(rp.alive){
+        if(rp.alive && (rp.spawnProtect||0)<=0){
           const p=rp.obj.position.clone();
           const localPlayerBackup=player.obj.position.clone();
           // Same humanoid-sized approximation as enemies.
@@ -2697,13 +2752,49 @@ function updateUI(){
   document.getElementById("materials").textContent=materials;
   document.getElementById("score").innerHTML=`<b>Kills:</b> ${player.kills} | <b>Tode:</b> ${player.deaths}`;
   document.getElementById("hp").textContent=`HP: ${Math.ceil(player.hp)} / ${player.maxHp}`;
+  const healthFill=document.getElementById("healthFill");
+  if(healthFill){
+    const hpRatio=Math.max(0,Math.min(1,player.hp/player.maxHp));
+    healthFill.style.width=`${hpRatio*100}%`;
+    healthFill.style.filter=hpRatio<.3?"saturate(1.6) brightness(.9)":"none";
+  }
+
+  const ammoText=document.getElementById("ammoText");
+  const ammoSegments=document.getElementById("ammoSegments");
+  const reloadTrack=document.getElementById("reloadTrack");
+  const reloadFill=document.getElementById("reloadFill");
+
+  if(ammoText){
+    ammoText.textContent=player.reloading
+      ?`Nachladen… ${player.reloadTimer.toFixed(1)}s`
+      :`Magazin: ${player.ammo} / ${player.magSize}  [R]`;
+  }
+  if(ammoSegments){
+    const signature=`${player.magSize}:${player.ammo}`;
+    if(ammoSegments.dataset.sig!==signature){
+      ammoSegments.dataset.sig=signature;
+      ammoSegments.innerHTML="";
+      for(let i=0;i<player.magSize;i++){
+        const seg=document.createElement("span");
+        seg.className="ammoSeg"+(i<player.ammo?"":" spent");
+        ammoSegments.appendChild(seg);
+      }
+    }
+  }
+  if(reloadTrack && reloadFill){
+    reloadTrack.style.display=player.reloading?"block":"none";
+    const p=player.reloading && player.reloadDuration>0
+      ?1-(player.reloadTimer/player.reloadDuration):0;
+    reloadFill.style.width=`${Math.max(0,Math.min(1,p))*100}%`;
+  }
+
   document.getElementById("dash").textContent=player.dashCd<=0?"Dash: bereit":`Dash: ${player.dashCd.toFixed(1)}s`;
   document.getElementById("jumpState").textContent=player.onGround?"Sprung: bereit":"In der Luft";
   if(player.starterAbility){
     document.getElementById("weaponState").textContent=
-      `Waffe: ${player.weaponName} | Start: ${player.starterAbility}`;
+      `Waffe: ${player.weaponName} | Munition: ${player.ammo}/${player.magSize} ∞${player.reloading?` | Nachladen ${player.reloadTimer.toFixed(1)}s`:""} | Start: ${player.starterAbility}`;
   }else{
-    document.getElementById("weaponState").textContent=`Waffe: ${player.weaponName}`;
+    document.getElementById("weaponState").textContent=`Waffe: ${player.weaponName} | Munition: ${player.ammo}/${player.magSize} ∞${player.reloading?` | Nachladen ${player.reloadTimer.toFixed(1)}s`:""}`;
   }
 }
 
@@ -2734,8 +2825,9 @@ function restart(){
 
   Object.assign(player,{
     hp:100,maxHp:100,speed:4.2,sprintSpeed:6.8,fireCd:0,dashCd:0,dashTimer:0,
-    kills:0,deaths:0,alive:true,respawn:0,yVel:0,onGround:true,
+    kills:0,deaths:0,alive:true,respawn:0,spawnProtect:0,yVel:0,onGround:true,
     weaponName:"Pistole",damage:30,fireRate:.42,bulletSpeed:21,multishot:1,spread:0,
+    ammo:16,magSize:16,reloading:false,reloadTimer:0,reloadDuration:1.25,
     pierce:0,explosive:false,lifesteal:0,chain:false,critChance:0,critMult:2,burn:false,
     maxHpBonus:0,regen:0,moveBonus:0,dashBonus:0,shieldOnRound:false,starterAbility:""
   });
@@ -2748,13 +2840,13 @@ function restart(){
 
 
 document.addEventListener("visibilitychange",()=>{
-  if(document.hidden && !netReady && !paused && !shopOpen){
+  if(document.hidden && !paused && !shopOpen){
     pauseGame();
   }
 });
 
 window.addEventListener("blur",()=>{
-  if(!netReady && !paused && !shopOpen){
+  if(!paused && !shopOpen){
     pauseGame();
   }
 });
@@ -2770,19 +2862,29 @@ function loop(now){
   const dt=Math.min((now-last)/1000,.033);
   last=now;
 
-  if(!paused || netReady){
+  if(!paused){
     updatePlayer(dt);
-    if(!netReady)updateEnemies(dt);
+    updateEnemies(dt);
     updateBullets(dt);
     updateDrops(dt);
     updateTemporaryWalls(dt);
     updateGrenades(dt);
     updateCamera(dt);
+
+    for(const rp of remotePlayers.values()){
+      if(rp.spawnProtect>0)rp.spawnProtect=Math.max(0,rp.spawnProtect-dt);
+      if(rp.shieldBubble){
+        rp.shieldBubble.visible=rp.alive && rp.spawnProtect>0;
+        if(rp.shieldBubble.visible){
+          rp.shieldBubble.rotation.y+=dt*.8;
+          rp.shieldBubble.material.opacity=.12+.10*(.5+.5*Math.sin(now*.012));
+        }
+      }
+      updateHealthBar(rp);
+    }
+
     updateUI();
   }
-
-  // Multiplayer state sync (~20 updates/sec internally throttled).
-  sendLocalState(now);
 
   renderer.render(scene,camera);
   requestAnimationFrame(loop);
