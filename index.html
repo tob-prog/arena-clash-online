@@ -438,7 +438,12 @@ function applyRemoteState(id,state){
   rp.alive=state.alive!==false;
   rp.obj.visible=rp.alive;
 
-  rp.obj.position.set(state.x,state.y,state.z);
+  let remoteY=Number(state.y)||0;
+
+  // Avoid tiny network/physics offsets making the remote model hover.
+  if(Math.abs(remoteY)<.04)remoteY=0;
+
+  rp.obj.position.set(state.x,remoteY,state.z);
   rp.obj.rotation.y=state.yaw||0;
   rp.weapon=state.weapon||"rifle";
 }
@@ -1151,6 +1156,31 @@ let mouseInside=false;
 let lastMouseX=null;
 let lastMouseY=null;
 
+let pointerLocked=false;
+
+function requestGamePointerLock(){
+  if(!netReady || paused || shopOpen)return;
+  if(document.pointerLockElement===renderer.domElement)return;
+  renderer.domElement.requestPointerLock?.();
+}
+
+function releaseGamePointerLock(){
+  if(document.pointerLockElement){
+    document.exitPointerLock?.();
+  }
+}
+
+document.addEventListener("pointerlockchange",()=>{
+  pointerLocked=document.pointerLockElement===renderer.domElement;
+  const el=document.getElementById("inputState");
+  if(el){
+    el.textContent=pointerLocked
+      ? "Input: Maus gesperrt | ESC = Menü"
+      : "Input: Maus frei | ins Spiel klicken";
+  }
+});
+
+
 // Direkte Maussteuerung ohne Pointer Lock:
 // Jede echte Mausbewegung dreht die Kamera.
 // Das Fadenkreuz bleibt exakt in der Bildschirmmitte und entspricht der Blick-/Schussrichtung.
@@ -1172,8 +1202,16 @@ renderer.domElement.addEventListener("mouseleave",()=>{
 });
 
 renderer.domElement.addEventListener("mousemove",e=>{
-  if(paused || shopOpen || !mouseInside)return;
+  if(paused || shopOpen)return;
 
+  if(pointerLocked){
+    yaw-=e.movementX*.0026;
+    pitch-=e.movementY*.0023;
+    pitch=clamp(pitch,-1.22,1.02);
+    return;
+  }
+
+  if(!mouseInside)return;
   if(lastMouseX===null || lastMouseY===null){
     lastMouseX=e.clientX;
     lastMouseY=e.clientY;
@@ -1182,20 +1220,12 @@ renderer.domElement.addEventListener("mousemove",e=>{
 
   const dx=e.clientX-lastMouseX;
   const dy=e.clientY-lastMouseY;
-
   lastMouseX=e.clientX;
   lastMouseY=e.clientY;
 
-  // Niedrige, direkte FPS-Sensitivität.
-  const sensitivityX=.0030;
-  const sensitivityY=.0026;
-
-  yaw -= dx*sensitivityX;
-  pitch -= dy*sensitivityY;
+  yaw-=dx*.0030;
+  pitch-=dy*.0026;
   pitch=clamp(pitch,-1.22,1.02);
-
-  const el=document.getElementById("inputState");
-  if(el)el.textContent="Input: Direktes Umsehen";
 });
 
 // Linksklick schießt direkt in die Blickrichtung/Fadenkreuzmitte.
@@ -1203,6 +1233,12 @@ renderer.domElement.addEventListener("mousedown",e=>{
   if(paused || shopOpen)return;
 
   renderer.domElement.focus({preventScroll:true});
+
+  if(netReady && !pointerLocked){
+    e.preventDefault();
+    requestGamePointerLock();
+    return;
+  }
 
   if(e.button===0){
     e.preventDefault();
@@ -1303,9 +1339,11 @@ function pauseGame(){
   lastMouseX=null;
   lastMouseY=null;
   renderer.domElement.style.cursor="default";
+  releaseGamePointerLock();
 
   document.getElementById("pauseMenu").style.display="flex";
-  document.getElementById("inputState").textContent="Input: pausiert";
+  document.getElementById("inputState").textContent=
+    netReady ? "Menü offen – Online-Spiel läuft weiter" : "Input: pausiert";
 }
 
 function resumeGame(){
@@ -1315,16 +1353,15 @@ function resumeGame(){
   renderer.domElement.focus({preventScroll:true});
   lastMouseX=null;
   lastMouseY=null;
-  if(mouseInside)renderer.domElement.style.cursor="none";
+  renderer.domElement.style.cursor="none";
 
-  // Must be called directly from the user click/key event where possible.
-  renderer.domElement.focus({preventScroll:true});
-
-  document.getElementById("inputState").textContent="Input: Maus bewegen | Linksklick schießen";
+  document.getElementById("inputState").textContent=
+    netReady ? "Input: Maus wird gesperrt …" : "Input: Maus bewegen | Linksklick schießen";
 }
 
 document.getElementById("resumeBtn").addEventListener("click",()=>{
   resumeGame();
+  requestGamePointerLock();
 });
 
 
@@ -1507,7 +1544,7 @@ function moveEntity(obj,delta,r=.6){
   }
 }
 
-function getSurfaceHeightAt(x,z,r=.4){
+function getSurfaceHeightAt(x,z,r=.4,maxStepUp=.32,currentY=0){
   let h=0;
   const probe=new THREE.Vector3(x,0,z);
 
@@ -1518,7 +1555,15 @@ function getSurfaceHeightAt(x,z,r=.4){
 
     if(Math.abs(local.x)<=half.x+r &&
        Math.abs(local.z)<=half.z+r){
-      h=Math.max(h,mesh.position.y+half.y);
+
+      const top=mesh.position.y+half.y;
+
+      // CRITICAL:
+      // Do not treat the top of a wall/crate as ground when the
+      // player merely touches it from the side.
+      if(top<=currentY+maxStepUp){
+        h=Math.max(h,top);
+      }
     }
   }
 
@@ -1863,6 +1908,7 @@ function showStartChoice(){
       document.querySelectorAll("#startCards .choiceCard").forEach(c=>c.disabled=true);
 
       selectedSuper=sup.id;
+      if(netReady)requestGamePointerLock();
       superCooldownMax=sup.cooldown;
       superCooldown=0;
       player.starterAbility=sup.name;
@@ -2032,8 +2078,19 @@ function updateVertical(dt){
   if(!player.alive)return;
   player.yVel+=GRAVITY*dt;
   let nextY=player.obj.position.y+player.yVel*dt;
-  const surface=getSurfaceHeightAt(player.obj.position.x,player.obj.position.z,player.radius*.7);
-  if(nextY<=surface){nextY=surface;player.yVel=0;player.onGround=true;}
+  const surface=getSurfaceHeightAt(
+    player.obj.position.x,
+    player.obj.position.z,
+    player.radius*.7,
+    .32,
+    player.obj.position.y
+  );
+
+  if(nextY<=surface){
+    nextY=surface;
+    player.yVel=0;
+    player.onGround=true;
+  }
   else player.onGround=false;
   player.obj.position.y=nextY;
 }
@@ -2316,6 +2373,11 @@ function toggleHitboxDebug(){
 }
 
 function updatePlayer(dt){
+  if(paused && netReady){
+    player.fireCd=Math.max(0,player.fireCd-dt);
+    player.dashCd=Math.max(0,player.dashCd-dt);
+    return;
+  }
   player.fireCd=Math.max(0,player.fireCd-dt);
   superCooldown=Math.max(0,superCooldown-dt);
   player.dashCd=Math.max(0,player.dashCd-dt);
@@ -2638,13 +2700,13 @@ function restart(){
 
 
 document.addEventListener("visibilitychange",()=>{
-  if(document.hidden && !paused && !shopOpen){
+  if(document.hidden && !netReady && !paused && !shopOpen){
     pauseGame();
   }
 });
 
 window.addEventListener("blur",()=>{
-  if(!paused && !shopOpen){
+  if(!netReady && !paused && !shopOpen){
     pauseGame();
   }
 });
@@ -2660,7 +2722,7 @@ function loop(now){
   const dt=Math.min((now-last)/1000,.033);
   last=now;
 
-  if(!paused){
+  if(!paused || netReady){
     updatePlayer(dt);
     updateEnemies(dt);
     updateBullets(dt);
