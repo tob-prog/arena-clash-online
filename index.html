@@ -50,6 +50,12 @@ canvas{display:block;cursor:crosshair}
 #itemSlotHud.ready{box-shadow:0 0 14px rgba(110,210,255,.18)}
 #itemSlotText{font-weight:800}
 #itemSlotHint{font-size:11px;opacity:.72;margin-top:3px}
+#deathOverlay{
+  position:fixed;inset:0;z-index:110;display:none;
+  align-items:center;justify-content:center;pointer-events:none;
+  background:rgba(40,0,0,.28);font-size:28px;font-weight:900;
+  text-shadow:0 2px 10px #000;
+}
 #pickupPrompt{
   position:fixed;left:50%;bottom:120px;transform:translateX(-50%);
   z-index:45;display:none;padding:10px 14px;border-radius:10px;
@@ -219,6 +225,7 @@ canvas{display:block;cursor:crosshair}
   <div><b>Runde:</b> <span id="round">1</span></div>
   <div><b>Gegner übrig:</b> <span id="remaining">0</span></div>
   <div><b>Material:</b> <span id="materials">0</span> ✦</div>
+  <div><b>Geld:</b> $<span id="money">0</span></div>
   <div id="score"><b>Kills:</b> 0 | <b>Tode:</b> 0</div>
   <div id="hp">HP: 100 / 100</div>
   <div id="healthHud"><div id="healthTrack"><div id="healthFill"></div></div></div>
@@ -245,12 +252,13 @@ canvas{display:block;cursor:crosshair}
   Leertaste = Springen<br>
   E = Super-Ability<br>
   H = Hitbox-Debug<br>
-  R = Nachladen<br>F = Shop-Item aufnehmen<br>Q = Item-Slot benutzen<br><br>
+  R = Nachladen<br>F = Shop-Item kaufen<br>Q = Item-Slot benutzen<br><br>
   <span id="inputState">Input: Klick ins Spiel für Maus-Lock</span><br><span id="shotDebug">Schüsse erkannt: 0</span><br><span id="moveState">Tempo: Stillstand</span><br><span id="superState">Super: nicht gewählt</span>
 </div>
 
 <div id="roundBanner"></div>
 <div id="pickupPrompt"></div>
+<div id="deathOverlay">ELIMINIERT – Respawn …</div>
 <div id="crosshair"></div>
 <div id="spawnProtectionFx">
   <div id="spawnProtectionText">SPAWNSCHUTZ 3.0s</div>
@@ -318,6 +326,8 @@ let netOpponentId=null;
 let netReady=false;
 let netSlot=0;
 let netMatchStarted=false;
+let netMoney=0;
+let deathRespawnPending=false;
 let remoteState=null;
 let lastNetSend=0;
 
@@ -380,6 +390,8 @@ function handleNetMessage(msg){
     netPlayerId=msg.playerId;
     netSlot=Number.isInteger(msg.slot)?msg.slot:0;
     netMatchStarted=false;
+    netMoney=Number(msg.money)||0;
+    updateMoneyHud();
 
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
@@ -394,6 +406,8 @@ function handleNetMessage(msg){
     netOpponentId=msg.opponentId||null;
     netSlot=Number.isInteger(msg.slot)?msg.slot:1;
     netMatchStarted=false;
+    netMoney=Number(msg.money)||netMoney;
+    updateMoneyHud();
 
     if(netOpponentId){
       ensureRemotePlayer(netOpponentId);
@@ -481,7 +495,20 @@ function handleNetMessage(msg){
       if(player.hp<=0 && player.alive){
         player.alive=false;
         clearInputState();
-        setTimeout(()=>sendNet("request_respawn"),900);
+
+        const deathOverlay=document.getElementById("deathOverlay");
+        if(deathOverlay)deathOverlay.style.display="flex";
+
+        if(!deathRespawnPending){
+          deathRespawnPending=true;
+          setTimeout(()=>{
+            if(netConnected && netReady && !player.alive){
+              sendNet("request_respawn");
+            }else{
+              deathRespawnPending=false;
+            }
+          },900);
+        }
       }
     }else if(msg.targetId===netOpponentId && remotePlayers.has(netOpponentId)){
       const rp=remotePlayers.get(netOpponentId);
@@ -490,6 +517,45 @@ function handleNetMessage(msg){
       rp.obj.visible=rp.alive;
       updateHealthBar(rp);
     }
+    return;
+  }
+
+  if(msg.type==="kill"){
+    if(msg.killerId===netPlayerId){
+      player.kills++;
+      netMoney=Number(msg.money)||netMoney;
+      updateMoneyHud();
+      showBanner(`Kill! +$${Number(msg.reward)||0}`);
+    }
+    if(msg.targetId===netPlayerId){
+      player.deaths++;
+    }
+    return;
+  }
+
+  if(msg.type==="money"){
+    netMoney=Math.max(0,Number(msg.money)||0);
+    updateMoneyHud();
+    return;
+  }
+
+  if(msg.type==="item_purchased"){
+    netMoney=Math.max(0,Number(msg.money)||0);
+    updateMoneyHud();
+
+    const def=ARENA_ITEM_TYPES.find(x=>x.id===msg.itemId);
+    if(def){
+      heldArenaItem=def;
+      showBanner(`${def.name} gekauft – [Q] benutzen`);
+      updateArenaItemHud();
+    }
+    return;
+  }
+
+  if(msg.type==="purchase_failed"){
+    netMoney=Math.max(0,Number(msg.money)||0);
+    updateMoneyHud();
+    showBanner(msg.message||"Kauf nicht möglich.");
     return;
   }
 
@@ -504,6 +570,21 @@ function handleNetMessage(msg){
       player.obj.position.set(msg.position.x,msg.position.y,msg.position.z);
       player.yVel=0;
       player.onGround=true;
+      player.fireCd=0;
+      player.recoilBloom=0;
+      roundActive=true;
+      paused=false;
+      deathRespawnPending=false;
+      clearInputState();
+
+      const deathOverlay=document.getElementById("deathOverlay");
+      if(deathOverlay)deathOverlay.style.display="none";
+
+      document.getElementById("pauseMenu").style.display="none";
+      document.getElementById("inputState").textContent=
+        document.pointerLockElement===renderer.domElement
+          ?"Input: Maus gelockt"
+          :"Input: Respawn – Klick ins Spiel";
     }else{
       ensureRemotePlayer(msg.playerId);
       const rp=remotePlayers.get(msg.playerId);
@@ -1347,7 +1428,6 @@ function makeHealthBar(){
   );
   fg.position.z=.001;
   group.add(bg);group.add(fg);
-  group.renderOrder=50;
   group.userData.fg=fg;
   return group;
 }
@@ -1359,13 +1439,48 @@ function attachHealthBar(entity){
   entity.healthBar=bar;
 }
 
+function healthBarOccluded(entity){
+  if(!entity?.healthBar)return true;
+
+  const worldPos=new THREE.Vector3();
+  entity.healthBar.getWorldPosition(worldPos);
+
+  const origin=camera.position.clone();
+  const dir=worldPos.clone().sub(origin);
+  const distance=dir.length();
+  if(distance<=.1)return false;
+  dir.normalize();
+
+  const occluders=[];
+  for(const o of obstacles){
+    if(o.mesh?.visible)occluders.push(o.mesh);
+  }
+  for(const w of temporaryWalls){
+    if(w.mesh?.visible)occluders.push(w.mesh);
+  }
+
+  healthBarRaycaster.set(origin,dir);
+  healthBarRaycaster.near=.05;
+  healthBarRaycaster.far=Math.max(.05,distance-.12);
+
+  return healthBarRaycaster.intersectObjects(occluders,false).length>0;
+}
+
 function updateHealthBar(entity){
   if(!entity.healthBar)return;
+
   const ratio=Math.max(0,entity.hp/entity.maxHp);
   const fg=entity.healthBar.userData.fg;
   fg.scale.x=ratio;
   fg.position.x=-(1-ratio)*.66/2;
-  entity.healthBar.lookAt(camera.position);
+
+  entity.healthBar.visible=entity.alive!==false && !healthBarOccluded(entity);
+  if(!entity.healthBar.visible)return;
+
+  const parentQuat=new THREE.Quaternion();
+  entity.obj.getWorldQuaternion(parentQuat);
+  const invParent=parentQuat.clone().invert();
+  entity.healthBar.quaternion.copy(invParent.multiply(camera.quaternion));
 }
 
 const bullets=[];
@@ -1374,6 +1489,7 @@ const keys={};
 
 const mouse={x:window.innerWidth/2,y:window.innerHeight/2};
 const raycaster=new THREE.Raycaster();
+const healthBarRaycaster=new THREE.Raycaster();
 const mouseNdc=new THREE.Vector2();
 const aimPoint=new THREE.Vector3();
 
@@ -1399,7 +1515,7 @@ let arenaItemUseCooldown=0;
 
 const ARENA_ITEM_TYPES=[
   {
-    id:"medkit",name:"Medkit",desc:"+45 HP",
+    id:"medkit",price:75,name:"Medkit",desc:"+45 HP",
     geometry:()=>new THREE.BoxGeometry(.42,.18,.32),
     color:0xe8ecef,
     accent:0xe64b4b,
@@ -1409,7 +1525,7 @@ const ARENA_ITEM_TYPES=[
     }
   },
   {
-    id:"adrenaline",name:"Adrenalin",desc:"7s schneller bewegen",
+    id:"adrenaline",price:100,name:"Adrenalin",desc:"7s schneller bewegen",
     geometry:()=>new THREE.CylinderGeometry(.10,.10,.46,12),
     color:0x56d7ff,
     accent:0x163b50,
@@ -1420,7 +1536,7 @@ const ARENA_ITEM_TYPES=[
     }
   },
   {
-    id:"overdrive",name:"Overdrive",desc:"6s höhere Feuerrate",
+    id:"overdrive",price:125,name:"Overdrive",desc:"6s höhere Feuerrate",
     geometry:()=>new THREE.OctahedronGeometry(.20),
     color:0xffa94d,
     accent:0x6f3100,
@@ -1431,7 +1547,7 @@ const ARENA_ITEM_TYPES=[
     }
   },
   {
-    id:"ammo",name:"Munitions-Kit",desc:"Magazin sofort voll",
+    id:"ammo",price:60,name:"Munitions-Kit",desc:"Magazin sofort voll",
     geometry:()=>new THREE.BoxGeometry(.38,.28,.22),
     color:0xffd65c,
     accent:0x4b3b00,
@@ -1459,7 +1575,7 @@ function makeWorldLabel(text){
   ctx.fillText(text,256,58);
   ctx.font="22px Arial";
   ctx.fillStyle="rgba(255,255,255,.78)";
-  ctx.fillText("F = aufnehmen",256,94);
+  ctx.fillText("F = kaufen",256,94);
 
   const tex=new THREE.CanvasTexture(canvas);
   const sprite=new THREE.Sprite(new THREE.SpriteMaterial({
@@ -1520,16 +1636,14 @@ function createArenaItemShop(){
     group.position.set(x,.82,z);
     scene.add(group);
 
-    const label=makeWorldLabel(`${def.name} – ${def.desc}`);
+    const label=makeWorldLabel(`${def.name} – $${def.price} – ${def.desc}`);
     label.position.set(x,1.8,z);
     scene.add(label);
 
     arenaShopItems.push({
       def,group,label,pedestal,
       baseY:.82,
-      phase:i*Math.PI*.5,
-      available:true,
-      respawn:0
+      phase:i*Math.PI*.5
     });
   });
 }
@@ -1537,7 +1651,6 @@ function createArenaItemShop(){
 function nearestArenaShopItem(){
   let best=null,bestDist=Infinity;
   for(const item of arenaShopItems){
-    if(!item.available)continue;
     const d=item.group.position.distanceTo(player.obj.position);
     if(d<bestDist){best=item;bestDist=d;}
   }
@@ -1550,14 +1663,26 @@ function pickupArenaShopItem(){
   const {item,dist}=nearestArenaShopItem();
   if(!item || dist>1.65)return;
 
-  heldArenaItem=item.def;
-  item.available=false;
-  item.respawn=20;
-  item.group.visible=false;
-  item.label.visible=false;
+  if(heldArenaItem){
+    showBanner("Item-Slot ist bereits belegt.");
+    return;
+  }
 
-  showBanner(`${item.def.name} aufgenommen – [Q] benutzen`);
+  if(netReady){
+    sendNet("buy_item",{itemId:item.def.id});
+    return;
+  }
+
+  if(netMoney<item.def.price){
+    showBanner(`Zu wenig Geld – benötigt $${item.def.price}`);
+    return;
+  }
+
+  netMoney-=item.def.price;
+  heldArenaItem=item.def;
+  updateMoneyHud();
   updateArenaItemHud();
+  showBanner(`${item.def.name} gekauft – [Q] benutzen`);
 }
 
 function useHeldArenaItem(){
@@ -1569,6 +1694,11 @@ function useHeldArenaItem(){
   arenaItemUseCooldown=.25;
   item.use();
   updateArenaItemHud();
+}
+
+function updateMoneyHud(){
+  const el=document.getElementById("money");
+  if(el)el.textContent=Math.max(0,Math.floor(netMoney));
 }
 
 function updateArenaItemHud(){
@@ -1594,23 +1724,13 @@ function updateArenaItemShop(dt,now){
   if(prompt){
     if(roundActive && !paused && !shopOpen && near.item && near.dist<=1.65){
       prompt.style.display="block";
-      prompt.textContent=`[F] ${near.item.def.name} aufnehmen – ${near.item.def.desc}`;
+      prompt.textContent=`[F] ${near.item.def.name} kaufen – $${near.item.def.price} – ${near.item.def.desc}`;
     }else{
       prompt.style.display="none";
     }
   }
 
   for(const item of arenaShopItems){
-    if(!item.available){
-      item.respawn=Math.max(0,item.respawn-dt);
-      if(item.respawn<=0){
-        item.available=true;
-        item.group.visible=true;
-        item.label.visible=true;
-      }
-      continue;
-    }
-
     // Unterschiedliche, gut sichtbare Shop-Animation:
     // schweben + drehen + pulsierender Ring.
     const t=now*.001+item.phase;
