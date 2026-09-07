@@ -236,7 +236,7 @@ wss.on("connection", ws => {
 
 
       // ======================================================
-      // FESTE SPAWNPUNKTE
+      // SPAWNPUNKTE
       // ======================================================
 
       const spawn0 = {
@@ -267,6 +267,7 @@ wss.on("connection", ws => {
           existing?.id || null,
 
         slot: 1,
+
         money: 0,
 
         spawn: spawn1,
@@ -276,7 +277,7 @@ wss.on("connection", ws => {
 
 
       // ======================================================
-      // MATCH STARTEN
+      // MATCH START
       // ======================================================
 
       if (existing) {
@@ -285,57 +286,28 @@ wss.on("connection", ws => {
           Date.now() + 3000;
 
 
-        // Spieler 1 erfährt,
-        // dass Spieler 2 verbunden ist
-
         send(existing.ws, {
           type: "opponent_joined",
-
-          playerId:
-            ws.playerId,
-
-          opponentSpawn:
-            spawn1
+          playerId: ws.playerId,
+          opponentSpawn: spawn1
         });
 
-
-        // ====================================================
-        // SPIELER 1 START
-        // ====================================================
 
         send(existing.ws, {
           type: "match_start",
-
-          opponentId:
-            ws.playerId,
-
+          opponentId: ws.playerId,
           slot: 0,
-
-          spawn:
-            spawn0,
-
-          opponentSpawn:
-            spawn1
+          spawn: spawn0,
+          opponentSpawn: spawn1
         });
 
-
-        // ====================================================
-        // SPIELER 2 START
-        // ====================================================
 
         send(ws, {
           type: "match_start",
-
-          opponentId:
-            existing.id,
-
+          opponentId: existing.id,
           slot: 1,
-
-          spawn:
-            spawn1,
-
-          opponentSpawn:
-            spawn0
+          spawn: spawn1,
+          opponentSpawn: spawn0
         });
       }
 
@@ -366,12 +338,8 @@ wss.on("connection", ws => {
         room,
         {
           type: "state",
-
-          playerId:
-            ws.playerId,
-
-          state:
-            msg.state
+          playerId: ws.playerId,
+          state: msg.state
         },
         ws
       );
@@ -381,37 +349,10 @@ wss.on("connection", ws => {
 
 
     // ========================================================
-    // SHOOT
+    // LEGACY SHOOT
     // ========================================================
 
     if (msg.type === "shoot") {
-
-      broadcastRoom(
-        room,
-        {
-          type: "remote_shoot",
-
-          playerId:
-            ws.playerId,
-
-          origin:
-            msg.origin,
-
-          dir:
-            msg.dir,
-
-          damage:
-            msg.damage,
-
-          speed:
-            msg.speed,
-
-          weapon:
-            msg.weapon
-        },
-        ws
-      );
-
       return;
     }
 
@@ -425,12 +366,8 @@ wss.on("connection", ws => {
       broadcastRoom(
         room,
         {
-          type:
-            "remote_ability",
-
-          playerId:
-            ws.playerId,
-
+          type: "remote_ability",
+          playerId: ws.playerId,
           ...msg
         },
         ws
@@ -446,15 +383,42 @@ wss.on("connection", ws => {
 
     if (msg.type === "hit") {
 
-      const attacker = room.players.find(p => p.ws === ws);
-      const target = room.players.find(p => p.id === msg.targetId);
+      const attacker = room.players.find(
+        p => p.ws === ws
+      );
 
-      if (!attacker || !target || attacker.id === target.id) return;
-      if (!target.alive) return;
+      const target = room.players.find(
+        p => p.id === msg.targetId
+      );
 
-      if ((target.spawnProtectedUntil || 0) > Date.now()) {
+      if (!attacker || !target) {
         return;
       }
+
+      if (attacker.id === target.id) {
+        return;
+      }
+
+      if (!target.alive) {
+        return;
+      }
+
+
+      // ======================================================
+      // SPAWNSCHUTZ
+      // ======================================================
+
+      if (
+        (target.spawnProtectedUntil || 0) >
+        Date.now()
+      ) {
+        return;
+      }
+
+
+      // ======================================================
+      // DAMAGE VALIDIEREN
+      // ======================================================
 
       const damage = Math.max(
         0,
@@ -464,16 +428,32 @@ wss.on("connection", ws => {
         )
       );
 
+      if (damage <= 0) {
+        return;
+      }
+
+
       const oldHp = target.hp;
+
+
+      // ======================================================
+      // HP REDUZIEREN
+      // ======================================================
 
       target.hp = Math.max(
         0,
         target.hp - damage
       );
 
+
       if (target.hp <= 0) {
         target.alive = false;
       }
+
+
+      // ======================================================
+      // DAMAGE AN BEIDE CLIENTS
+      // ======================================================
 
       broadcastRoom(room, {
         type: "damage",
@@ -499,26 +479,19 @@ wss.on("connection", ws => {
           (attacker.money || 0) +
           reward;
 
+
         broadcastRoom(room, {
           type: "kill",
-
-          killerId:
-            attacker.id,
-
-          targetId:
-            target.id,
-
+          killerId: attacker.id,
+          targetId: target.id,
           reward,
-
-          money:
-            attacker.money
+          money: attacker.money
         });
+
 
         send(attacker.ws, {
           type: "money",
-
-          money:
-            attacker.money
+          money: attacker.money
         });
       }
 
@@ -541,6 +514,7 @@ wss.on("connection", ws => {
         return;
       }
 
+
       const prices = {
         medkit: 75,
         adrenaline: 100,
@@ -548,23 +522,25 @@ wss.on("connection", ws => {
         ammo: 60
       };
 
+
       const itemId =
         String(msg.itemId || "");
+
 
       const price =
         prices[itemId];
 
+
+      // ======================================================
+      // UNBEKANNTES ITEM
+      // ======================================================
+
       if (!price) {
 
         return send(ws, {
-          type:
-            "purchase_failed",
-
-          message:
-            "Unbekanntes Item.",
-
-          money:
-            buyer.money || 0
+          type: "purchase_failed",
+          message: "Unbekanntes Item.",
+          money: buyer.money || 0
         });
       }
 
@@ -579,14 +555,10 @@ wss.on("connection", ws => {
       ) {
 
         return send(ws, {
-          type:
-            "purchase_failed",
-
+          type: "purchase_failed",
           message:
             `Zu wenig Geld – benötigt $${price}.`,
-
-          money:
-            buyer.money || 0
+          money: buyer.money || 0
         });
       }
 
@@ -603,15 +575,10 @@ wss.on("connection", ws => {
       // ======================================================
 
       send(ws, {
-        type:
-          "item_purchased",
-
+        type: "item_purchased",
         itemId,
-
         price,
-
-        money:
-          buyer.money
+        money: buyer.money
       });
 
       return;
@@ -639,6 +606,10 @@ wss.on("connection", ws => {
       }
 
 
+      // ======================================================
+      // PLAYER RESET
+      // ======================================================
+
       player.hp = 100;
       player.alive = true;
 
@@ -651,6 +622,10 @@ wss.on("connection", ws => {
         Date.now() + 3000;
 
 
+      // ======================================================
+      // SPAWNPUNKT
+      // ======================================================
+
       const slot =
         room.players.findIndex(
           p =>
@@ -659,7 +634,7 @@ wss.on("connection", ws => {
         );
 
 
-      const pos =
+      const position =
         slot === 0
 
           ? {
@@ -676,18 +651,13 @@ wss.on("connection", ws => {
 
 
       // ======================================================
-      // RESPAWN AN BEIDE SENDEN
+      // RESPAWN AN BEIDE CLIENTS
       // ======================================================
 
       broadcastRoom(room, {
-        type:
-          "respawn",
-
-        playerId:
-          player.id,
-
-        position:
-          pos
+        type: "respawn",
+        playerId: player.id,
+        position
       });
 
       return;
@@ -701,14 +671,15 @@ wss.on("connection", ws => {
 
   ws.on(
     "close",
-    () =>
-      removePlayer(ws)
+    () => {
+      removePlayer(ws);
+    }
   );
 });
 
 
 // ============================================================
-// START SERVER
+// SERVER START
 // ============================================================
 
 server.listen(PORT, () => {
