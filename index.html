@@ -397,16 +397,17 @@ function beginOnlineMatch(){
   netReady=true;
   document.getElementById("onlineLobby").style.display="none";
 
-  // Multiplayer starts directly, no local bot round.
-  document.getElementById("startChoice").style.display="flex";
-  document.getElementById("startChoice").style.pointerEvents="auto";
+  // Stop local round logic while each player chooses a super.
+  roundActive=false;
+  shopOpen=false;
 
   // Remove local enemies from the single-player prototype.
   for(const e of enemies)scene.remove(e.obj);
   enemies.length=0;
   remainingEnemies=0;
-  roundActive=true;
-  shopOpen=false;
+
+  // Re-bind and show the clickable super selection.
+  showStartChoice();
 
   setOnlineBadge(`Online 1v1 – ${netRoom}`);
 }
@@ -1854,7 +1855,7 @@ function showStartChoice(){
   document.querySelectorAll("#startCards .choiceCard").forEach(card=>{
     card.disabled=false;
     card.onclick=()=>{
-      if(roundActive)return;
+      if(roundActive && !netReady)return;
 
       const sup=configs[card.dataset.super];
       if(!sup)return;
