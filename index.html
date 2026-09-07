@@ -463,10 +463,14 @@ function handleNetMessage(msg){
       rp.hp=100;
       rp.maxHp=100;
       rp.alive=true;
+      const spawnX=Number(msg.opponentSpawn.x)||0;
+      const spawnZ=Number(msg.opponentSpawn.z)||0;
+      const spawnGround=getSurfaceHeightAt(spawnX,spawnZ,.42);
+
       rp.obj.position.set(
-        Number(msg.opponentSpawn.x)||0,
-        Number(msg.opponentSpawn.y)||0,
-        Number(msg.opponentSpawn.z)||0
+        spawnX,
+        Number.isFinite(spawnGround)?spawnGround:(Number(msg.opponentSpawn.y)||0),
+        spawnZ
       );
       rp.obj.visible=true;
 
@@ -744,7 +748,17 @@ function applyRemoteState(id,state){
   const sy=Number(state.y);
   const sz=Number(state.z);
   if(Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sz)){
-    rp.obj.position.set(sx,sy,sz);
+    let visualY=sy;
+
+    // Wenn der sendende Spieler am Boden steht, bestimmen wir die Höhe
+    // aus derselben Map-Geometrie lokal neu. Dadurch "schwebt" das
+    // Remote-Modell nicht durch kleine Y-Abweichungen im Netzwerk.
+    if(state.onGround===true){
+      const groundY=getSurfaceHeightAt(sx,sz,.42);
+      if(Number.isFinite(groundY))visualY=groundY;
+    }
+
+    rp.obj.position.set(sx,visualY,sz);
   }
   rp.obj.rotation.y=Number(state.yaw)||0;
   rp.weapon=state.weapon||"rifle";
@@ -770,6 +784,7 @@ function sendLocalState(now){
       pitch,
       hp:player.hp,
       alive:player.alive,
+      onGround:player.onGround===true,
       spawnProtect:Math.max(0,player.spawnProtect||0),
       weapon:WEAPONS[currentWeaponIndex]?.id||"rifle",
       super:selectedSuper
