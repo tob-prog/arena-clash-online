@@ -43,6 +43,19 @@ canvas{display:block;cursor:crosshair}
   background:rgba(255,255,255,.12);margin-top:6px
 }
 #reloadFill{height:100%;width:0;background:#65b8ff}
+#itemSlotHud{
+  margin-top:10px;padding:9px 10px;border-radius:9px;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10)
+}
+#itemSlotHud.ready{box-shadow:0 0 14px rgba(110,210,255,.18)}
+#itemSlotText{font-weight:800}
+#itemSlotHint{font-size:11px;opacity:.72;margin-top:3px}
+#pickupPrompt{
+  position:fixed;left:50%;bottom:120px;transform:translateX(-50%);
+  z-index:45;display:none;padding:10px 14px;border-radius:10px;
+  background:rgba(8,12,18,.82);border:1px solid rgba(255,255,255,.18);
+  font-weight:800;text-shadow:0 1px 4px #000;pointer-events:none;
+}
 #spawnProtectionFx{
   position:fixed;inset:0;z-index:35;pointer-events:none;display:none;
   align-items:center;justify-content:center;
@@ -214,6 +227,10 @@ canvas{display:block;cursor:crosshair}
     <div id="ammoSegments"></div>
     <div id="reloadTrack"><div id="reloadFill"></div></div>
   </div>
+  <div id="itemSlotHud">
+    <div id="itemSlotText">Item [Q]: leer</div>
+    <div id="itemSlotHint">Im Arena-Shop mit F aufnehmen</div>
+  </div>
   <div id="dash">Dash: bereit</div>
   <div id="jumpState">Sprung: bereit</div>
   <div id="weaponState">Waffe: Standard-Blaster</div></div>
@@ -221,18 +238,19 @@ canvas{display:block;cursor:crosshair}
 <div id="help">
   <b>Steuerung</b><br>
   WASD = Bewegung<br>
-  Maus bewegen = direkt umsehen<br>
+  Maus = Umsehen (Pointer Lock)<br>
   Linksklick = Schießen<br>
   Mausrad = Waffe wechseln<br>
   Strg = Dash<br>
   Leertaste = Springen<br>
   E = Super-Ability<br>
   H = Hitbox-Debug<br>
-  R = Nachladen<br><br>
-  <span id="inputState">Input: Klick ins Spiel</span><br><span id="shotDebug">Schüsse erkannt: 0</span><br><span id="moveState">Tempo: Stillstand</span><br><span id="superState">Super: nicht gewählt</span>
+  R = Nachladen<br>F = Shop-Item aufnehmen<br>Q = Item-Slot benutzen<br><br>
+  <span id="inputState">Input: Klick ins Spiel für Maus-Lock</span><br><span id="shotDebug">Schüsse erkannt: 0</span><br><span id="moveState">Tempo: Stillstand</span><br><span id="superState">Super: nicht gewählt</span>
 </div>
 
 <div id="roundBanner"></div>
+<div id="pickupPrompt"></div>
 <div id="crosshair"></div>
 <div id="spawnProtectionFx">
   <div id="spawnProtectionText">SPAWNSCHUTZ 3.0s</div>
@@ -299,6 +317,7 @@ let netPlayerId=null;
 let netOpponentId=null;
 let netReady=false;
 let netSlot=0;
+let netMatchStarted=false;
 let remoteState=null;
 let lastNetSend=0;
 
@@ -360,6 +379,8 @@ function handleNetMessage(msg){
     netRoom=msg.room;
     netPlayerId=msg.playerId;
     netSlot=Number.isInteger(msg.slot)?msg.slot:0;
+    netMatchStarted=false;
+
     document.getElementById("roomCodeText").textContent=msg.room;
     document.getElementById("roomCodeBox").style.display="block";
     setOnlineStatus("Raum erstellt. Warte auf deinen Freund …");
@@ -372,17 +393,24 @@ function handleNetMessage(msg){
     netPlayerId=msg.playerId;
     netOpponentId=msg.opponentId||null;
     netSlot=Number.isInteger(msg.slot)?msg.slot:1;
-    if(netOpponentId)ensureRemotePlayer(netOpponentId);
+    netMatchStarted=false;
+
+    if(netOpponentId){
+      ensureRemotePlayer(netOpponentId);
+      if(msg.opponentSpawn){
+        const rp=remotePlayers.get(netOpponentId);
+        rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
+        rp.obj.visible=true;
+      }
+    }
+
     if(msg.spawn){
       player.obj.position.set(msg.spawn.x,msg.spawn.y,msg.spawn.z);
-      player.yVel=0; player.onGround=true;
+      player.yVel=0;
+      player.onGround=true;
     }
-    if(msg.opponentSpawn && netOpponentId){
-      const rp=remotePlayers.get(netOpponentId);
-      rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
-      rp.obj.visible=true;
-    }
-    setOnlineStatus("Raum beigetreten.");
+
+    setOnlineStatus("Raum beigetreten. Warte auf Matchstart …");
     setOnlineBadge(`Raum ${msg.room}`);
     return;
   }
@@ -390,31 +418,36 @@ function handleNetMessage(msg){
   if(msg.type==="opponent_joined"){
     netOpponentId=msg.playerId;
     ensureRemotePlayer(netOpponentId);
+
     if(msg.opponentSpawn){
       const rp=remotePlayers.get(netOpponentId);
       rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
       rp.obj.visible=true;
     }
-    setOnlineStatus("Freund verbunden – Spiel startet.");
+
+    // WICHTIG: Hier NICHT das Match starten.
+    // Der Server sendet danach genau eine match_start-Nachricht an beide Spieler.
+    setOnlineStatus("Freund verbunden – Match wird gestartet …");
     return;
   }
 
   if(msg.type==="match_start"){
     netOpponentId=msg.opponentId;
     netSlot=Number.isInteger(msg.slot)?msg.slot:netSlot;
+
     ensureRemotePlayer(netOpponentId);
 
-    if(msg.spawn){
-      player.obj.position.set(msg.spawn.x,msg.spawn.y,msg.spawn.z);
-      player.yVel=0; player.onGround=true;
-    }
     if(msg.opponentSpawn){
       const rp=remotePlayers.get(netOpponentId);
       rp.obj.position.set(msg.opponentSpawn.x,msg.opponentSpawn.y,msg.opponentSpawn.z);
       rp.obj.visible=true;
     }
 
-    beginOnlineMatch(msg.spawn);
+    // Schutz vor doppeltem Matchstart / doppelter Super-Auswahl.
+    if(!netMatchStarted){
+      netMatchStarted=true;
+      beginOnlineMatch(msg.spawn||null);
+    }
     return;
   }
 
@@ -440,12 +473,22 @@ function handleNetMessage(msg){
 
   if(msg.type==="damage"){
     if(msg.targetId===netPlayerId){
+      // Der Server blockiert Spawn-Schutz bereits autoritativ.
+      // Diese Prüfung verhindert zusätzlich sichtbare Client-Ausreißer.
       if((player.spawnProtect||0)>0)return;
-      player.hp=Math.max(0,msg.hp);
+
+      player.hp=Math.max(0,Number(msg.hp)||0);
       if(player.hp<=0 && player.alive){
         player.alive=false;
+        clearInputState();
         setTimeout(()=>sendNet("request_respawn"),900);
       }
+    }else if(msg.targetId===netOpponentId && remotePlayers.has(netOpponentId)){
+      const rp=remotePlayers.get(netOpponentId);
+      rp.hp=Math.max(0,Number(msg.hp)||0);
+      rp.alive=rp.hp>0;
+      rp.obj.visible=rp.alive;
+      updateHealthBar(rp);
     }
     return;
   }
@@ -459,10 +502,13 @@ function handleNetMessage(msg){
       player.reloadTimer=0;
       player.ammo=player.magSize;
       player.obj.position.set(msg.position.x,msg.position.y,msg.position.z);
+      player.yVel=0;
+      player.onGround=true;
     }else{
       ensureRemotePlayer(msg.playerId);
       const rp=remotePlayers.get(msg.playerId);
       rp.hp=100;
+      rp.alive=true;
       rp.spawnProtect=3;
       rp.obj.position.set(msg.position.x,msg.position.y,msg.position.z);
       rp.obj.visible=true;
@@ -476,6 +522,12 @@ function handleNetMessage(msg){
     setOnlineStatus("Dein Freund hat den Raum verlassen.");
     setOnlineBadge(`Raum ${netRoom} – Gegner weg`);
     netReady=false;
+    netMatchStarted=false;
+    netOpponentId=null;
+    clearInputState();
+    if(document.pointerLockElement===renderer.domElement){
+      document.exitPointerLock?.();
+    }
     return;
   }
 
@@ -488,28 +540,33 @@ function beginOnlineMatch(serverSpawn=null){
   netReady=true;
   document.getElementById("onlineLobby").style.display="none";
 
-  // Stop local round logic while each player chooses a super.
+  // Während der Super-Auswahl darf das Spiel noch nicht laufen.
   roundActive=false;
   shopOpen=false;
+  paused=false;
 
-  // Remove local enemies from the single-player prototype.
+  // Einzelspieler-Gegner aus dem alten Prototyp entfernen.
   for(const e of enemies)scene.remove(e.obj);
   enemies.length=0;
   remainingEnemies=0;
 
-  // Re-bind and show the clickable super selection.
-  showStartChoice();
-
   player.spawnProtect=3;
 
-  // Prefer the server-assigned spawn so both clients agree on who is where.
+  // Server-Spawn hat Vorrang. Fallback bleibt deterministisch.
   const spawn=serverSpawn
     ? new THREE.Vector3(serverSpawn.x,serverSpawn.y,serverSpawn.z)
-    : (netSlot===1 ? new THREE.Vector3(30,0,6) : new THREE.Vector3(-30,0,-6));
+    : (netSlot===1
+        ? new THREE.Vector3(30,0,6)
+        : new THREE.Vector3(-30,0,-6));
+
   player.obj.position.copy(spawn);
   player.yVel=0;
   player.onGround=true;
 
+  // Genau einmal pro Match die Fähigkeit wählen.
+  showStartChoice();
+
+  setOnlineStatus("Match gestartet – wähle deine Super-Ability.");
   setOnlineBadge(`Online 1v1 – ${netRoom}`);
 }
 
@@ -519,12 +576,12 @@ function ensureRemotePlayer(id){
   const obj=makeFighter(0x2f6fa8,.62);
   obj.position.set(8,0,8);
   obj.visible=true;
+
+  // Gegner darf nicht durch aggressives Frustum-Culling verschwinden.
   obj.traverse(child=>{
-    if(child.isMesh){
-      child.frustumCulled=false;
-      child.renderOrder=2;
-    }
+    if(child.isMesh)child.frustumCulled=false;
   });
+
   scene.add(obj);
 
   const rp={
@@ -554,11 +611,12 @@ function ensureRemotePlayer(id){
   obj.add(shieldBubble);
   rp.shieldBubble=shieldBubble;
 
+  // Kleiner Marker über dem Gegner – erleichtert Multiplayer-Tests.
   const marker=new THREE.Mesh(
-    new THREE.ConeGeometry(.16,.34,10),
-    new THREE.MeshBasicMaterial({color:0xff4f4f,depthTest:false})
+    new THREE.ConeGeometry(.15,.32,10),
+    new THREE.MeshBasicMaterial({color:0xff4c4c,depthTest:false})
   );
-  marker.position.y=2.95;
+  marker.position.y=2.9;
   marker.rotation.z=Math.PI;
   marker.renderOrder=999;
   obj.add(marker);
@@ -575,7 +633,9 @@ function applyRemoteState(id,state){
   rp.alive=state.alive!==false;
   rp.obj.visible=rp.alive;
 
-  const sx=Number(state.x), sy=Number(state.y), sz=Number(state.z);
+  const sx=Number(state.x);
+  const sy=Number(state.y);
+  const sz=Number(state.z);
   if(Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sz)){
     rp.obj.position.set(sx,sy,sz);
   }
@@ -977,6 +1037,9 @@ const player={
   weaponName:"Pistole",
   damage:30, fireRate:.42, bulletSpeed:20, multishot:1, spread:0,
   ammo:16, magSize:16, reloading:false, reloadTimer:0, reloadDuration:1.25,
+  recoilBloom:0,
+  tempSpeedTimer:0,tempSpeedBonus:0,
+  tempFireTimer:0,tempFireMultiplier:1,
   pierce:0, explosive:false, lifesteal:0, chain:false,
   critChance:0, critMult:2, burn:false,
   // abilities
@@ -996,7 +1059,11 @@ const WEAPONS=[
     fireRate:.42,
     bulletSpeed:21,
     multishot:1,
-    spread:0,
+    spread:.004,
+    recoilPitch:.012,
+    recoilYaw:.004,
+    bloomPerShot:.0025,
+    maxBloom:.018,
     model:"pistol",
     magSize:16,
     reloadDuration:1.25
@@ -1004,11 +1071,15 @@ const WEAPONS=[
   {
     id:"rifle",
     name:"Sturmgewehr",
-    damage:17,
-    fireRate:.15,
+    damage:13,
+    fireRate:.16,
     bulletSpeed:25,
     multishot:1,
-    spread:.018,
+    spread:.020,
+    recoilPitch:.022,
+    recoilYaw:.010,
+    bloomPerShot:.006,
+    maxBloom:.070,
     model:"rifle",
     magSize:30,
     reloadDuration:1.7
@@ -1268,11 +1339,11 @@ function makeHealthBar(){
   const group=new THREE.Group();
   const bg=new THREE.Mesh(
     new THREE.PlaneGeometry(1.4,.16),
-    new THREE.MeshBasicMaterial({color:0x351515,transparent:true,opacity:.9,depthTest:false})
+    new THREE.MeshBasicMaterial({color:0x351515,transparent:true,opacity:.9,depthTest:true,depthWrite:false})
   );
   const fg=new THREE.Mesh(
     new THREE.PlaneGeometry(1.32,.1),
-    new THREE.MeshBasicMaterial({color:0x36d65c,depthTest:false})
+    new THREE.MeshBasicMaterial({color:0x36d65c,depthTest:true,depthWrite:false})
   );
   fg.position.z=.001;
   group.add(bg);group.add(fg);
@@ -1320,6 +1391,241 @@ let superCooldown=0;
 let superCooldownMax=8;
 const temporaryWalls=[];
 const grenades=[];
+
+// ======================== ARENA ITEM SHOP ========================
+const arenaShopItems=[];
+let heldArenaItem=null;
+let arenaItemUseCooldown=0;
+
+const ARENA_ITEM_TYPES=[
+  {
+    id:"medkit",name:"Medkit",desc:"+45 HP",
+    geometry:()=>new THREE.BoxGeometry(.42,.18,.32),
+    color:0xe8ecef,
+    accent:0xe64b4b,
+    use(){
+      player.hp=Math.min(player.maxHp,player.hp+45);
+      showBanner("Medkit: +45 HP");
+    }
+  },
+  {
+    id:"adrenaline",name:"Adrenalin",desc:"7s schneller bewegen",
+    geometry:()=>new THREE.CylinderGeometry(.10,.10,.46,12),
+    color:0x56d7ff,
+    accent:0x163b50,
+    use(){
+      player.tempSpeedTimer=7;
+      player.tempSpeedBonus=2.1;
+      showBanner("Adrenalin: Tempo erhöht");
+    }
+  },
+  {
+    id:"overdrive",name:"Overdrive",desc:"6s höhere Feuerrate",
+    geometry:()=>new THREE.OctahedronGeometry(.20),
+    color:0xffa94d,
+    accent:0x6f3100,
+    use(){
+      player.tempFireTimer=6;
+      player.tempFireMultiplier=.72;
+      showBanner("Overdrive: Feuerrate erhöht");
+    }
+  },
+  {
+    id:"ammo",name:"Munitions-Kit",desc:"Magazin sofort voll",
+    geometry:()=>new THREE.BoxGeometry(.38,.28,.22),
+    color:0xffd65c,
+    accent:0x4b3b00,
+    use(){
+      player.reloading=false;
+      player.reloadTimer=0;
+      player.ammo=player.magSize;
+      showBanner("Munitions-Kit: Magazin voll");
+    }
+  }
+];
+
+function makeWorldLabel(text){
+  const canvas=document.createElement("canvas");
+  canvas.width=512;canvas.height=128;
+  const ctx=canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="rgba(7,10,14,.82)";
+  ctx.fillRect(8,12,496,104);
+  ctx.strokeStyle="rgba(255,255,255,.25)";
+  ctx.lineWidth=3;ctx.strokeRect(8,12,496,104);
+  ctx.fillStyle="#fff";
+  ctx.font="bold 31px Arial";
+  ctx.textAlign="center";
+  ctx.fillText(text,256,58);
+  ctx.font="22px Arial";
+  ctx.fillStyle="rgba(255,255,255,.78)";
+  ctx.fillText("F = aufnehmen",256,94);
+
+  const tex=new THREE.CanvasTexture(canvas);
+  const sprite=new THREE.Sprite(new THREE.SpriteMaterial({
+    map:tex,transparent:true,depthTest:true,depthWrite:false
+  }));
+  sprite.scale.set(3.2,.8,1);
+  return sprite;
+}
+
+function createArenaItemShop(){
+  // Fester Shop im südlichen Bereich, außerhalb der Spawnpunkte.
+  const baseX=0, baseZ=29;
+
+  const sign=new THREE.Mesh(
+    new THREE.BoxGeometry(7,.9,.25),
+    new THREE.MeshStandardMaterial({color:0x202a34,roughness:.55,metalness:.25})
+  );
+  sign.position.set(baseX,2.65,baseZ+1.3);
+  scene.add(sign);
+
+  const signLabel=makeWorldLabel("ARENA-SHOP");
+  signLabel.position.set(baseX,2.68,baseZ+1.15);
+  signLabel.scale.set(3.6,.9,1);
+  scene.add(signLabel);
+
+  ARENA_ITEM_TYPES.forEach((def,i)=>{
+    const x=baseX+(i-1.5)*1.7;
+    const z=baseZ;
+
+    const pedestal=new THREE.Mesh(
+      new THREE.CylinderGeometry(.55,.68,.32,18),
+      new THREE.MeshStandardMaterial({color:0x303b46,roughness:.48,metalness:.45})
+    );
+    pedestal.position.set(x,.16,z);
+    pedestal.castShadow=true;
+    pedestal.receiveShadow=true;
+    scene.add(pedestal);
+
+    const group=new THREE.Group();
+
+    const core=new THREE.Mesh(
+      def.geometry(),
+      new THREE.MeshStandardMaterial({
+        color:def.color,emissive:def.accent,emissiveIntensity:.22,
+        roughness:.38,metalness:.24
+      })
+    );
+    core.castShadow=true;
+    group.add(core);
+
+    const ring=new THREE.Mesh(
+      new THREE.TorusGeometry(.33,.035,8,24),
+      new THREE.MeshBasicMaterial({color:def.color,transparent:true,opacity:.65})
+    );
+    ring.rotation.x=Math.PI/2;
+    group.add(ring);
+
+    group.position.set(x,.82,z);
+    scene.add(group);
+
+    const label=makeWorldLabel(`${def.name} – ${def.desc}`);
+    label.position.set(x,1.8,z);
+    scene.add(label);
+
+    arenaShopItems.push({
+      def,group,label,pedestal,
+      baseY:.82,
+      phase:i*Math.PI*.5,
+      available:true,
+      respawn:0
+    });
+  });
+}
+
+function nearestArenaShopItem(){
+  let best=null,bestDist=Infinity;
+  for(const item of arenaShopItems){
+    if(!item.available)continue;
+    const d=item.group.position.distanceTo(player.obj.position);
+    if(d<bestDist){best=item;bestDist=d;}
+  }
+  return {item:best,dist:bestDist};
+}
+
+function pickupArenaShopItem(){
+  if(!roundActive || paused || shopOpen || !player.alive)return;
+
+  const {item,dist}=nearestArenaShopItem();
+  if(!item || dist>1.65)return;
+
+  heldArenaItem=item.def;
+  item.available=false;
+  item.respawn=20;
+  item.group.visible=false;
+  item.label.visible=false;
+
+  showBanner(`${item.def.name} aufgenommen – [Q] benutzen`);
+  updateArenaItemHud();
+}
+
+function useHeldArenaItem(){
+  if(!roundActive || paused || shopOpen || !player.alive || !heldArenaItem)return;
+  if(arenaItemUseCooldown>0)return;
+
+  const item=heldArenaItem;
+  heldArenaItem=null;
+  arenaItemUseCooldown=.25;
+  item.use();
+  updateArenaItemHud();
+}
+
+function updateArenaItemHud(){
+  const box=document.getElementById("itemSlotHud");
+  const txt=document.getElementById("itemSlotText");
+  if(!box || !txt)return;
+
+  if(heldArenaItem){
+    txt.textContent=`Item [Q]: ${heldArenaItem.name} – ${heldArenaItem.desc}`;
+    box.classList.add("ready");
+  }else{
+    txt.textContent="Item [Q]: leer";
+    box.classList.remove("ready");
+  }
+}
+
+function updateArenaItemShop(dt,now){
+  arenaItemUseCooldown=Math.max(0,arenaItemUseCooldown-dt);
+
+  const prompt=document.getElementById("pickupPrompt");
+  const near=nearestArenaShopItem();
+
+  if(prompt){
+    if(roundActive && !paused && !shopOpen && near.item && near.dist<=1.65){
+      prompt.style.display="block";
+      prompt.textContent=`[F] ${near.item.def.name} aufnehmen – ${near.item.def.desc}`;
+    }else{
+      prompt.style.display="none";
+    }
+  }
+
+  for(const item of arenaShopItems){
+    if(!item.available){
+      item.respawn=Math.max(0,item.respawn-dt);
+      if(item.respawn<=0){
+        item.available=true;
+        item.group.visible=true;
+        item.label.visible=true;
+      }
+      continue;
+    }
+
+    // Unterschiedliche, gut sichtbare Shop-Animation:
+    // schweben + drehen + pulsierender Ring.
+    const t=now*.001+item.phase;
+    item.group.position.y=item.baseY+Math.sin(t*2.1)*.12;
+    item.group.rotation.y+=dt*.9;
+    const ring=item.group.children[1];
+    if(ring){
+      const s=1+Math.sin(t*3.0)*.12;
+      ring.scale.setScalar(s);
+      ring.material.opacity=.48+.22*(.5+.5*Math.sin(t*3.0));
+    }
+  }
+}
+// ===================================================================
+
 let paused=false;
 let shotDebugCount=0;
 let mouseHeld=false;
@@ -1334,29 +1640,44 @@ let mouseInside=false;
 let pointerLocked=false;
 
 function requestGamePointerLock(){
-  if(paused || shopOpen || !netReady || !roundActive)return;
-  if(document.pointerLockElement!==renderer.domElement){
-    renderer.domElement.requestPointerLock?.();
-  }
+  // Pointer Lock nur während eines tatsächlich laufenden Spiels anfordern.
+  if(paused || shopOpen || !roundActive)return;
+  if(document.pointerLockElement===renderer.domElement)return;
+
+  try{
+    const promise=renderer.domElement.requestPointerLock?.();
+    if(promise?.catch)promise.catch(()=>{});
+  }catch{}
 }
 
 document.addEventListener("pointerlockchange",()=>{
+  const wasLocked=pointerLocked;
   pointerLocked=document.pointerLockElement===renderer.domElement;
+
   renderer.domElement.style.cursor=pointerLocked?"none":"default";
 
-  // ESC releases Pointer Lock. In an active match this is the pause action.
-  if(!pointerLocked && !paused && !shopOpen && netReady && roundActive){
+  const inputState=document.getElementById("inputState");
+  if(pointerLocked){
+    if(inputState)inputState.textContent="Input: Maus gelockt";
+  }else if(wasLocked && !paused && !shopOpen && roundActive){
+    // ESC löst zuerst den Browser-Pointer-Lock.
+    // Nur dieser Übergang öffnet anschließend das Pausemenü.
     pauseGame(false);
   }
 });
 
 document.addEventListener("pointerlockerror",()=>{
-  const el=document.getElementById("inputState");
-  if(el)el.textContent="Input: Pointer Lock konnte nicht aktiviert werden";
+  const inputState=document.getElementById("inputState");
+  if(inputState)inputState.textContent="Input: Pointer Lock fehlgeschlagen – ins Spiel klicken";
 });
 
-renderer.domElement.addEventListener("mouseenter",()=>{ mouseInside=true; });
-renderer.domElement.addEventListener("mouseleave",()=>{ mouseInside=false; });
+renderer.domElement.addEventListener("mouseenter",()=>{
+  mouseInside=true;
+});
+
+renderer.domElement.addEventListener("mouseleave",()=>{
+  mouseInside=false;
+});
 
 document.addEventListener("mousemove",e=>{
   if(paused || shopOpen || !pointerLocked)return;
@@ -1364,16 +1685,13 @@ document.addEventListener("mousemove",e=>{
   const sensitivityX=.0026;
   const sensitivityY=.0023;
 
-  yaw -= e.movementX*sensitivityX;
-  pitch -= e.movementY*sensitivityY;
+  yaw-=e.movementX*sensitivityX;
+  pitch-=e.movementY*sensitivityY;
   pitch=clamp(pitch,-1.22,1.02);
-
-  const el=document.getElementById("inputState");
-  if(el)el.textContent="Input: Maus gelockt";
 });
 
 renderer.domElement.addEventListener("click",()=>{
-  if(!paused && !shopOpen && netReady && roundActive){
+  if(!paused && !shopOpen && roundActive){
     requestGamePointerLock();
   }
 });
@@ -1383,6 +1701,7 @@ renderer.domElement.addEventListener("mousedown",e=>{
   if(paused || shopOpen || !roundActive)return;
 
   renderer.domElement.focus({preventScroll:true});
+
   if(document.pointerLockElement!==renderer.domElement){
     requestGamePointerLock();
     return;
@@ -1426,13 +1745,20 @@ window.addEventListener("keydown",e=>{
 
   if(code==="escape"){
     if(shopOpen)return;
+
     if(paused){
       e.preventDefault();
       resumeGame();
-    }else if(document.pointerLockElement!==renderer.domElement){
-      e.preventDefault();
-      pauseGame(false);
+      requestGamePointerLock();
+      return;
     }
+
+    // Wenn Pointer Lock aktiv ist, ESC dem Browser überlassen.
+    // pointerlockchange öffnet danach genau einmal das Pausemenü.
+    if(document.pointerLockElement===renderer.domElement)return;
+
+    e.preventDefault();
+    pauseGame(false);
     return;
   }
 
@@ -1445,7 +1771,9 @@ window.addEventListener("keydown",e=>{
                  code==="space"?"space":
                  code==="keyh"?"h":
                  code==="keye"?"e":
-                 code==="keyr"?"r":key;
+                 code==="keyr"?"r":
+                 code==="keyf"?"f":
+                 code==="keyq"?"q":key;
 
   if(paused || shopOpen)return;
 
@@ -1458,12 +1786,14 @@ window.addEventListener("keydown",e=>{
     if(mapKey==="e")tryUseSuper();
     if(mapKey==="h")toggleHitboxDebug();
     if(mapKey==="r")startReload();
+    if(mapKey==="f")pickupArenaShopItem();
+    if(mapKey==="q")useHeldArenaItem();
   }
 
   keys[mapKey]=true;
 
 
-  if(["w","a","s","d","shift","ctrl","space","e"].includes(mapKey)){
+  if(["w","a","s","d","shift","ctrl","space","e","f","q"].includes(mapKey)){
     e.preventDefault();
   }
 },{capture:true});
@@ -1480,7 +1810,9 @@ window.addEventListener("keyup",e=>{
                  code==="controlleft"||code==="controlright"?"ctrl":
                  code==="space"?"space":
                  code==="keye"?"e":
-                 code==="keyr"?"r":key;
+                 code==="keyr"?"r":
+                 code==="keyf"?"f":
+                 code==="keyq"?"q":key;
 
   keys[mapKey]=false;
 },{capture:true});
@@ -1490,21 +1822,24 @@ function clearInputState(){
   mouseHeld=false;
 }
 
-function pauseGame(exitLock=true){
+function pauseGame(exitPointerLock=true){
   if(paused || shopOpen)return;
+
   paused=true;
   clearInputState();
   renderer.domElement.style.cursor="default";
-  if(exitLock && document.pointerLockElement===renderer.domElement){
-    document.exitPointerLock?.();
-  }
 
   document.getElementById("pauseMenu").style.display="flex";
   document.getElementById("inputState").textContent="Input: pausiert";
+
+  if(exitPointerLock && document.pointerLockElement===renderer.domElement){
+    document.exitPointerLock?.();
+  }
 }
 
 function resumeGame(){
   if(!paused)return;
+
   paused=false;
   document.getElementById("pauseMenu").style.display="none";
   renderer.domElement.focus({preventScroll:true});
@@ -1513,6 +1848,7 @@ function resumeGame(){
 
 document.getElementById("resumeBtn").addEventListener("click",()=>{
   resumeGame();
+  // Direkt im Button-Klick = gültige User-Geste für Pointer Lock.
   requestGamePointerLock();
 });
 
@@ -1575,11 +1911,9 @@ function pointInsideObstacle(worldPos,obstacle,padding=.02){
          Math.abs(local.z)<=half.z+padding;
 }
 
-function sphereHitsEnemy(point,enemy,radius=.12){
-  if(!enemy.alive)return false;
+function enemyHitPart(point,enemy,radius=.12){
+  if(!enemy.alive)return null;
 
-  // Humanoid capsule approximation:
-  // body from feet to head, not one oversized sphere.
   const base=enemy.obj.position;
   const scale=enemy.obj.scale?.y || 1;
 
@@ -1587,48 +1921,28 @@ function sphereHitsEnemy(point,enemy,radius=.12){
   const chestY=base.y+1.15*scale;
   const headY=base.y+1.85*scale;
 
-  // torso capsule
+  // Kopf zuerst prüfen, damit die Kopfkugel nicht vom Körper "geschluckt" wird.
+  const hx=point.x-base.x;
+  const hy=point.y-headY;
+  const hz=point.z-base.z;
+  const headRadius=.28*scale+radius;
+
+  if(hx*hx+hy*hy+hz*hz <= headRadius*headRadius)return "head";
+
   const torsoRadius=.38*scale+radius;
   const clampedY=Math.max(feetY+.35*scale,Math.min(point.y,chestY+.45*scale));
   const dx=point.x-base.x;
   const dz=point.z-base.z;
   const dy=point.y-clampedY;
 
-  if(dx*dx+dy*dy+dz*dz <= torsoRadius*torsoRadius)return true;
+  if(dx*dx+dy*dy+dz*dz <= torsoRadius*torsoRadius)return "body";
 
-  // head sphere
-  const hx=point.x-base.x;
-  const hy=point.y-headY;
-  const hz=point.z-base.z;
-  const headRadius=.28*scale+radius;
-
-  return hx*hx+hy*hy+hz*hz <= headRadius*headRadius;
+  return null;
 }
 
-function sphereHitsPlayer(point,radius=.12){
-  const base=player.obj.position;
-
-  const feetY=base.y;
-  const chestY=base.y+1.15;
-  const headY=base.y+1.72;
-
-  const torsoRadius=.38+radius;
-  const clampedY=Math.max(feetY+.35,Math.min(point.y,chestY+.42));
-
-  const dx=point.x-base.x;
-  const dz=point.z-base.z;
-  const dy=point.y-clampedY;
-
-  if(dx*dx+dy*dy+dz*dz <= torsoRadius*torsoRadius)return true;
-
-  const hx=point.x-base.x;
-  const hy=point.y-headY;
-  const hz=point.z-base.z;
-  const headRadius=.28+radius;
-
-  return hx*hx+hy*hy+hz*hz <= headRadius*headRadius;
+function sphereHitsEnemy(point,enemy,radius=.12){
+  return enemyHitPart(point,enemy,radius)!==null;
 }
-
 
 function horizontalCollides(pos,r=.6,entityY=0){
   const entityFeet=entityY;
@@ -1767,49 +2081,89 @@ function startReload(){
 function shootPlayer(){
   if(!player.alive || player.fireCd>0 || !roundActive || player.reloading)return;
   if(player.ammo<=0){ startReload(); return; }
+
   updateAimPoint();
 
+  const weapon=WEAPONS[currentWeaponIndex];
   const muzzleWorld=new THREE.Vector3();
   fpMuzzle.getWorldPosition(muzzleWorld);
-
   const muzzle={position:muzzleWorld};
 
+  const forward=new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.normalize();
+
+  const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion).normalize();
+  const up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion).normalize();
+
+  // Basisstreuung + wachsendes Verziehen bei schneller Schussfolge.
+  const currentSpread=(weapon.spread||0)+(player.recoilBloom||0);
+
+  let networkDir=null;
   const n=player.multishot;
+
   for(let i=0;i<n;i++){
-    let offset=0;
+    const shotDir=forward.clone();
+
+    // Zufällige horizontale UND vertikale Abweichung.
+    const spreadX=(Math.random()*2-1)*currentSpread;
+    const spreadY=(Math.random()*2-1)*currentSpread*.75;
+    shotDir.addScaledVector(right,spreadX);
+    shotDir.addScaledVector(up,spreadY);
+    shotDir.normalize();
+
     if(n>1){
       const center=(n-1)/2;
-      offset=(i-center)*(player.spread||.09);
+      const fan=(i-center)*(player.spread||.09);
+      shotDir.addScaledVector(right,fan).normalize();
     }
+
+    const shotTarget=muzzleWorld.clone().add(shotDir.clone().multiplyScalar(120));
+
     spawnBullet(
       muzzle,
-      aimPoint.clone(),
+      shotTarget,
       player.bulletSpeed,
       player.damage,
       "player",
-      offset,
+      0,
       true
     );
+
+    if(i===0)networkDir=shotDir.clone();
   }
 
-  if(netReady && netOpponentId){
-    const dir=aimPoint.clone().sub(muzzleWorld).normalize();
+  if(netReady && netOpponentId && networkDir){
     sendNet("shoot",{
       origin:{x:muzzleWorld.x,y:muzzleWorld.y,z:muzzleWorld.z},
-      dir:{x:dir.x,y:dir.y,z:dir.z},
+      dir:{x:networkDir.x,y:networkDir.y,z:networkDir.z},
       speed:player.bulletSpeed,
       damage:player.damage,
-      weapon:WEAPONS[currentWeaponIndex]?.id||"pistol"
+      weapon:weapon?.id||"pistol"
     });
   }
 
+  // Spürbarer Kamerarückstoß.
+  pitch=Math.min(1.02,pitch+(weapon.recoilPitch||.01));
+  yaw+=(Math.random()*2-1)*(weapon.recoilYaw||.004);
+
+  // Sturmgewehr verzieht bei Dauerfeuer zunehmend stärker.
+  player.recoilBloom=Math.min(
+    weapon.maxBloom||.03,
+    (player.recoilBloom||0)+(weapon.bloomPerShot||.003)
+  );
+
   player.ammo=Math.max(0,player.ammo-1);
-  if(player.ammo===0) setTimeout(()=>{ if(player.ammo===0) startReload(); },120);
+  if(player.ammo===0)setTimeout(()=>{if(player.ammo===0)startReload();},120);
 
   fpGun.position.z=.16;
+  fpGun.rotation.x=-.035;
+  fpGun.rotation.z=(Math.random()*2-1)*.018;
   muzzleFlash.intensity=4;
   muzzleFlashTimer=.06;
-  player.fireCd=player.fireRate;
+
+  const fireMult=player.tempFireTimer>0?player.tempFireMultiplier:1;
+  player.fireCd=player.fireRate*fireMult;
 }
 
 function tryDash(){
@@ -1975,11 +2329,11 @@ function showDamageNumber(worldPos,amount,label=""){
   animate();
 }
 
-function damageEnemy(e,amount,bullet=null){
+function damageEnemy(e,amount,bullet=null,hitPart=null){
   if(!e.alive)return;
 
   e.hp-=amount;
-  showDamageNumber(e.obj.position,amount,bullet?.explosive?"EXP ":"");
+  showDamageNumber(e.obj.position,amount,hitPart==="head"?"HEAD ":bullet?.explosive?"EXP ":"");
   if(bullet?.burn){
     e.burnTimer=3;
     e.burnDps=6;
@@ -2082,14 +2436,15 @@ function showStartChoice(){
       wrap.style.pointerEvents="none";
 
       renderer.domElement.focus({preventScroll:true});
-      setTimeout(()=>{
-        if(netReady){
-          roundActive=true;
-          shopOpen=false;
-        }else if(!roundActive){
-          startRound();
-        }
-      },120);
+
+      if(netReady){
+        roundActive=true;
+        shopOpen=false;
+        // Derselbe Klick auf die Super-Karte wird für Pointer Lock verwendet.
+        requestGamePointerLock();
+      }else if(!roundActive){
+        startRound();
+      }
     };
   });
 }
@@ -2530,6 +2885,19 @@ function updatePlayer(dt){
   player.fireCd=Math.max(0,player.fireCd-dt);
   player.spawnProtect=Math.max(0,(player.spawnProtect||0)-dt);
 
+  // Waffenverziehen normalisiert sich, sobald nicht permanent gefeuert wird.
+  const recoilRecovery=WEAPONS[currentWeaponIndex]?.id==="rifle"?.050:.080;
+  player.recoilBloom=Math.max(0,(player.recoilBloom||0)-recoilRecovery*dt);
+
+  if(player.tempSpeedTimer>0){
+    player.tempSpeedTimer=Math.max(0,player.tempSpeedTimer-dt);
+    if(player.tempSpeedTimer<=0)player.tempSpeedBonus=0;
+  }
+  if(player.tempFireTimer>0){
+    player.tempFireTimer=Math.max(0,player.tempFireTimer-dt);
+    if(player.tempFireTimer<=0)player.tempFireMultiplier=1;
+  }
+
   const spawnFx=document.getElementById("spawnProtectionFx");
   const spawnTxt=document.getElementById("spawnProtectionText");
   if(spawnFx){
@@ -2579,7 +2947,7 @@ function updatePlayer(dt){
     if(keys["a"])move.sub(right);
     if(move.lengthSq()>0){
       const sprinting=!!keys["shift"];
-      const baseSpeed=sprinting?player.sprintSpeed:player.speed;
+      const baseSpeed=(sprinting?player.sprintSpeed:player.speed)+(player.tempSpeedTimer>0?player.tempSpeedBonus:0);
       move.normalize().multiplyScalar((baseSpeed+player.moveBonus)*dt);
       moveEntity(player.obj,move,player.radius);
       player.isMoving=true;
@@ -2703,7 +3071,8 @@ function updateBullets(dt){
           const hitHead=hx*hx+hy*hy+hz*hz <= .34*.34;
 
           if(hitBody||hitHead){
-            const dmg=(hitHead?player.damage*1.5:player.damage);
+            const dmg=(hitHead?b.damage*1.75:b.damage);
+            if(hitHead)showDamageNumber(rp.obj.position,dmg,"HEAD ");
             requestDamageRemote(dmg);
             scene.remove(b.mesh);
             bullets.splice(i,1);
@@ -2713,16 +3082,20 @@ function updateBullets(dt){
       }
 
       let hitEnemy=null;
+      let hitPart=null;
       for(const e of enemies){
         if(!e.alive)continue;
-        if(sphereHitsEnemy(b.mesh.position,e,.10)){
+        const part=enemyHitPart(b.mesh.position,e,.10);
+        if(part){
           hitEnemy=e;
+          hitPart=part;
           break;
         }
       }
 
       if(hitEnemy){
-        damageEnemy(hitEnemy,b.damage,b);
+        const finalDamage=hitPart==="head"?b.damage*1.75:b.damage;
+        damageEnemy(hitEnemy,finalDamage,b,hitPart);
 
         if(b.owner==="player"){
           if(b.explosive)explodeAt(b.mesh.position,b.damage);
@@ -2784,6 +3157,8 @@ function updateCamera(dt){
   fpGun.position.x=sway;
   fpGun.position.y=bob;
   fpGun.position.z*=.82;
+  fpGun.rotation.x*=.76;
+  fpGun.rotation.z*=.72;
 
   if(muzzleFlashTimer>0){
     muzzleFlashTimer-=dt;
@@ -2792,6 +3167,7 @@ function updateCamera(dt){
 }
 
 function updateUI(){
+  updateArenaItemHud();
   const ms=document.getElementById("moveState");
   if(ms)ms.textContent=`Tempo: ${player.isSprinting?"Sprint":player.isMoving?"Gehen":"Stillstand"}`;
 
@@ -2894,6 +3270,7 @@ function restart(){
   });
 
   player.obj.visible=false;player.obj.position.set(-30,0,-6);
+  if(!netReady)netMatchStarted=false;
   applyWeapon(0);
   document.getElementById("startChoice").style.display="flex";
   showStartChoice();
@@ -2901,16 +3278,13 @@ function restart(){
 
 
 document.addEventListener("visibilitychange",()=>{
-  if(document.hidden && !paused && !shopOpen){
+  if(document.hidden && !paused && !shopOpen && roundActive){
     pauseGame();
   }
 });
 
-window.addEventListener("blur",()=>{
-  if(!paused && !shopOpen && document.pointerLockElement!==renderer.domElement){
-    pauseGame(false);
-  }
-});
+// Kein zusätzlicher window.blur-Pausehandler:
+// Browser-Fokus + Pointer-Lock würden sonst zwei Pause-Ereignisse gegeneinander auslösen.
 
 addEventListener("resize",()=>{
   camera.aspect=innerWidth/innerHeight;
@@ -2931,6 +3305,7 @@ function loop(now){
     updateTemporaryWalls(dt);
     updateGrenades(dt);
     updateCamera(dt);
+    updateArenaItemShop(dt,now);
 
     // Multiplayer state must be sent continuously; without this the opponent model
     // never receives a position and remote shots may arrive before a remote player exists.
@@ -2955,6 +3330,8 @@ function loop(now){
   requestAnimationFrame(loop);
 }
 
+createArenaItemShop();
+updateArenaItemHud();
 showStartChoice();
 document.getElementById("inputState").textContent="Input: bereit";
 requestAnimationFrame(loop);
